@@ -141,6 +141,8 @@ bool game_init(Game *g, bool headless, int w, int h,
      * assets/textures/ and it is used for the spikes.  Without one the spikes
      * are drawn procedurally. */
     static const char *spike_files[] = {
+        "textures/thorn.png",     /* Thorn1.png, the player's own spike */
+        "textures/Thorn1.png",
         "textures/spike.png",
         "textures/spike1.png",
         "textures/Spike1.png",
@@ -350,10 +352,12 @@ static void draw_background(Game *g)
     SDL_Color bottom = { 8, 6, 20, 255 };
     draw_gradient(ren, 0, 0, VIEW_W, VIEW_H, top, bottom);
 
-    /* glowing horizon */
-    SDL_Color skin_top = { 58, 30, 96, 255 };
-    SDL_Color skin_bottom = { 18, 12, 36, 255 };
-    draw_gradient(ren, 0, 420, VIEW_W, 128, skin_top, skin_bottom);
+    /* glowing horizon, just above the ground line */
+    SDL_Color skin_top = { 40, 22, 68, 0 };
+    SDL_Color skin_mid = { 62, 34, 104, 150 };
+    SDL_Color skin_bottom = { 20, 13, 40, 220 };
+    draw_gradient(ren, 0, 400, VIEW_W, 88, skin_top, skin_mid);
+    draw_gradient(ren, 0, 488, VIEW_W, 60, skin_mid, skin_bottom);
 
     /* parallax checker */
     float par = g->cam_x * 0.25f;
@@ -474,7 +478,11 @@ static void draw_spike(Game *g, const Obj *o)
     float w = o->w, h = o->h;
 
     if (g->tex_spike) {
-        SDL_FRect dst = { x, y, w, h };
+        /* the sprite is a cell sized triangle; keep a hair of padding so a
+         * row of spikes still reads as separate triangles */
+        SDL_FRect dst = { x + 1.0f, y, w - 2.0f, h };
+        draw_rect_blend(ren, x + w * 0.15f, y + h * 0.55f, w * 0.7f, h * 0.45f,
+                        0, 0, 0, 60);
         SDL_RenderTexture(ren, g->tex_spike, NULL, &dst);
         return;
     }
