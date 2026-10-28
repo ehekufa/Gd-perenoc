@@ -94,45 +94,28 @@ jobs:
           disable-animations: true
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
-            set -x
             adb install -r android/app/build/outputs/apk/debug/app-debug.apk
             adb shell am start -W -n com.ehekufa.pointofnoreturn/org.libsdl.app.SDLActivity
-            sleep 20
+            sleep 25
             mkdir -p emulator
             adb shell pidof com.ehekufa.pointofnoreturn > emulator/pid.txt || true
             adb logcat -d -v time > emulator/logcat.txt || true
             adb exec-out screencap -p > emulator/screen.png || true
-            echo "--- pid ---"; cat emulator/pid.txt
+            echo "--- pid ---"
+            cat emulator/pid.txt
             echo "--- app log ---"
-            grep -iE "pointofnoreturn|SDL|DEBUG|AndroidRuntime|FATAL" emulator/logcat.txt | tail -n 120 || true
-            if grep -q "FATAL EXCEPTION" emulator/logcat.txt; then
-              echo "::error::the app crashed, see the logcat artifact"
-              echo "CRASH" > emulator/verdict.txt
+            grep -iE "pointofnoreturn|SDL_main|SDL\)|AndroidRuntime|FATAL" emulator/logcat.txt | tail -n 80 || true
+            if grep -q "FATAL EXCEPTION\|Couldn't find function SDL_main" emulator/logcat.txt; then
+              echo "CRASH DETECTED" > emulator/verdict.txt
             else
               echo "NO CRASH DETECTED" > emulator/verdict.txt
             fi
-
-      # The workflow log and the artifacts are hard to reach from outside, so
-      # the important part of logcat is posted as a commit comment as well.
-      - name: Publish the emulator log as a commit comment
-        if: always()
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          set +e
-          {
-            echo "verdict: $(cat emulator/verdict.txt 2>/dev/null || echo 'no verdict')"
-            echo "pid: $(cat emulator/pid.txt 2>/dev/null)"
-            echo
-            echo '```'
-            grep -iE "pointofnoreturn|SDL|AndroidRuntime|FATAL|Exception" \
-              emulator/logcat.txt 2>/dev/null | tail -n 60
-            echo '```'
-          } > emulator/notes.md
-          gh api "repos/$GITHUB_REPOSITORY/commits/$GITHUB_SHA/comments" \
-            -f body="$(cat emulator/notes.md)" || true
-
+            cat emulator/verdict.txt
+            test -s emulator/pid.txt
+            if grep -qx "CRASH DETECTED" emulator/verdict.txt; then
+              echo "::error::the app does not start on Android"
+              exit 1
+            fi
       - uses: actions/upload-artifact@v4
         if: always()
         with:

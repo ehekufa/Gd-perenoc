@@ -7,6 +7,13 @@
  * Verify the level:         ./build/point_of_no_return --selftest
  */
 #include "gd.h"
+
+/* Mandatory on Android (and harmless everywhere else): SDL renames main() to
+ * SDL_main() and exports it, which is the symbol SDLActivity looks up in
+ * libmain.so.  Without this the native library loads but the activity finds
+ * no entry point and the app closes right after its splash screen. */
+#include <SDL3/SDL_main.h>
+
 #include <stdio.h>
 #include <string.h>
 #include <stdlib.h>
