@@ -1,0 +1,59 @@
+plugins {
+    id 'com.android.application'
+}
+
+android {
+    namespace = "com.ehekufa.pointofnoreturn"
+    compileSdkVersion 35
+    ndkVersion "27.2.12479018"
+
+    defaultConfig {
+        applicationId "com.ehekufa.pointofnoreturn"
+        minSdkVersion 21
+        targetSdkVersion 35
+        versionCode 1
+        versionName "1.0"
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_PLATFORM=android-21", "-DANDROID_STL=c++_static"
+                abiFilters 'arm64-v8a', 'armeabi-v7a'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // signed with the debug key so the release APK is installable as is;
+            // replace this with your own keystore before publishing anywhere
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    // the game textures (assets/textures/*.png) live in the repository root
+    sourceSets.main {
+        assets.srcDirs += ['../../assets']
+        jniLibs.srcDir 'libs'
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'jni/CMakeLists.txt'
+        }
+    }
+
+    applicationVariants.all { variant ->
+        tasks["merge${variant.name.capitalize()}Assets"]
+            .dependsOn("externalNativeBuild${variant.name.capitalize()}")
+    }
+
+    lint {
+        abortOnError = false
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+}
