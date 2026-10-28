@@ -2,6 +2,10 @@ plugins {
     id 'com.android.application'
 }
 
+// Bumped from CI (GD_VERSION_CODE / GD_VERSION_NAME), defaults to 1 / "1.0".
+def gdVersionCode = (System.getenv("GD_VERSION_CODE") ?: "1").toInteger()
+def gdVersionName = System.getenv("GD_VERSION_NAME") ?: "1.0"
+
 android {
     namespace = "com.ehekufa.pointofnoreturn"
     compileSdkVersion 35
@@ -13,8 +17,8 @@ android {
         targetSdkVersion 35
         // CI passes an increasing version so every build can be installed
         // over the previous one (same signing key required, see README).
-        versionCode (System.getenv("GD_VERSION_CODE") ?: "1").toInteger()
-        versionName (System.getenv("GD_VERSION_NAME") ?: "1.0")
+        versionCode gdVersionCode
+        versionName gdVersionName
 
         externalNativeBuild {
             cmake {
