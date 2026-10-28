@@ -151,11 +151,6 @@ jobs:
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release view apk-latest >/dev/null 2>&1 || \
-            gh release create apk-latest --title "Point of No Return — APK"
-          gh release edit apk-latest \
-            --notes "APK версии 1.0.$GITHUB_RUN_NUMBER (сборка #$GITHUB_RUN_NUMBER), ветка $GITHUB_REF_NAME, коммит $GITHUB_SHA.
-Каждая сборка проверяется запуском на эмуляторе Android 14."
-          gh release upload apk-latest \
-            android/app/build/outputs/apk/debug/app-debug.apk \
-            android/app/build/outputs/apk/release/app-release.apk --clobber
+          gh release view apk-latest >/dev/null 2>&1 || gh release create apk-latest --title "Point of No Return - APK"
+          gh release edit apk-latest --notes "APK 1.0.$GITHUB_RUN_NUMBER (build #$GITHUB_RUN_NUMBER), branch $GITHUB_REF_NAME, commit $GITHUB_SHA. Every build is started on an Android 14 emulator before it is published."
+          gh release upload apk-latest android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/release/app-release.apk --clobber
