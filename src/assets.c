@@ -1,5 +1,7 @@
 /*
- * Texture loading.  Uses stb_image so that the only runtime dependency is SDL3.
+ * Asset loading.  Textures go through stb_image, so the only runtime
+ * dependency is SDL3.  Everything is looked up relative to the working
+ * directory, the executable and (on Android) the APK assets.
  */
 #include "gd.h"
 
@@ -9,6 +11,64 @@
 
 #include <stdio.h>
 #include <string.h>
+
+static bool file_exists(const char *path)
+{
+    SDL_IOStream *io = SDL_IOFromFile(path, "rb");
+    if (!io) {
+        return false;
+    }
+    SDL_CloseIO(io);
+    return true;
+}
+
+const char *asset_find(const char *relpath, char *buffer, size_t buffer_size)
+{
+    const char *base = SDL_GetBasePath();
+
+    for (int attempt = 0; attempt < 5; attempt++) {
+        switch (attempt) {
+        case 0:
+            SDL_snprintf(buffer, buffer_size, "assets/%s", relpath);
+            break;
+        case 1:
+            SDL_snprintf(buffer, buffer_size, "../assets/%s", relpath);
+            break;
+        case 2:
+            SDL_snprintf(buffer, buffer_size, "../../assets/%s", relpath);
+            break;
+        case 3:
+            if (!base) {
+                continue;
+            }
+            SDL_snprintf(buffer, buffer_size, "%sassets/%s", base, relpath);
+            break;
+        default:
+            /* inside the APK the assets are addressed by their plain name */
+            SDL_snprintf(buffer, buffer_size, "%s", relpath);
+            break;
+        }
+        if (file_exists(buffer)) {
+            return buffer;
+        }
+    }
+    return NULL;
+}
+
+void *asset_load(const char *relpath, size_t *size)
+{
+    char path[512];
+    const char *found = asset_find(relpath, path, sizeof(path));
+    if (!found) {
+        SDL_Log("Asset not found: %s", relpath);
+        return NULL;
+    }
+    void *data = SDL_LoadFile(found, size);
+    if (!data) {
+        SDL_Log("Could not read asset %s: %s", found, SDL_GetError());
+    }
+    return data;
+}
 
 static SDL_Texture *load_from_memory(SDL_Renderer *ren, const void *data,
                                      size_t size, const char *name)
@@ -37,35 +97,24 @@ static SDL_Texture *load_from_memory(SDL_Renderer *ren, const void *data,
 
 SDL_Texture *texture_load(SDL_Renderer *ren, const char *relpath)
 {
-    const char *base = SDL_GetBasePath();
-    char candidates[6][512];
-    int n = 0;
-
-    SDL_snprintf(candidates[n++], sizeof(candidates[0]), "%s", relpath);
-    SDL_snprintf(candidates[n++], sizeof(candidates[0]), "assets/%s", relpath);
-    if (base) {
-        SDL_snprintf(candidates[n++], sizeof(candidates[0]), "%sassets/%s",
-                     base, relpath);
-        SDL_snprintf(candidates[n++], sizeof(candidates[0]), "%s%s", base, relpath);
-        SDL_snprintf(candidates[n++], sizeof(candidates[0]), "%s../assets/%s",
-                     base, relpath);
-        SDL_snprintf(candidates[n++], sizeof(candidates[0]), "%s../../assets/%s",
-                     base, relpath);
+    size_t size = 0;
+    void *data = asset_load(relpath, &size);
+    if (!data) {
+        return NULL;
     }
-
-    for (int i = 0; i < n; i++) {
-        size_t size = 0;
-        void *data = SDL_LoadFile(candidates[i], &size);
-        if (!data) {
-            continue;
-        }
-        SDL_Texture *tex = load_from_memory(ren, data, size, candidates[i]);
-        SDL_free(data);
-        if (tex) {
-            SDL_Log("Loaded texture: %s", candidates[i]);
-            return tex;
-        }
+    SDL_Texture *tex = load_from_memory(ren, data, size, relpath);
+    SDL_free(data);
+    if (tex) {
+        SDL_Log("Loaded texture: %s", relpath);
     }
-    SDL_Log("Could not load texture '%s'", relpath);
-    return NULL;
+    return tex;
+}
+
+SDL_Texture *texture_load_optional(SDL_Renderer *ren, const char *relpath)
+{
+    char path[512];
+    if (!asset_find(relpath, path, sizeof(path))) {
+        return NULL;
+    }
+    return texture_load(ren, relpath);
 }

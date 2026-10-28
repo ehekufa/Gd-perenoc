@@ -1,59 +1,68 @@
 /*
  * Autopilot / level verifier.
  *
- * The bot is a best-first search over "jump here" decisions.  A plain run
- * (without jumping) tells us where the cube dies; every ground frame before
- * that point becomes a candidate jump.  Candidates are ranked by how far the
- * resulting run gets, and the search recurses into the most promising ones.
+ * The bot searches for a sequence of jumps that carries the cube to the end of
+ * the level.  It is a beam search over "jump here" decisions:
+ *
+ *   1. from every state in the beam, run forward without jumping until the
+ *      cube dies and remember all the moments it was touching the ground,
+ *   2. jump at those moments, keep the jumps that get us the furthest,
+ *   3. repeat with the best states as the new beam.
+ *
  * The resulting list of jump positions drives the demo mode (F1 / --autoplay)
- * and proves in CI that the level is beatable.
+ * and, more importantly, proves in CI that the level is beatable.
  */
 #include "gd.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define MAX_PLAN      192
-#define SNAP_STEP     3.0f          /* one search branch every 3 px on ground  */
-#define MAX_SNAPS     8192
-#define MAX_CANDIDATES 12           /* how many branches we recurse into       */
-#define MIN_GAIN      12.0f         /* a jump must get us this much further    */
-#define MAX_STEPS     12000000L
-
-static float g_plan[MAX_PLAN];
-static int   g_plan_len;
-static long  g_budget;
+#define MAX_PLAN       96
+#define SNAP_STEP      6.0f       /* one candidate every 6 px on the ground  */
+#define MAX_SNAPS      4096
+#define BEAM_WIDTH     12         /* states kept between iterations         */
+#define MAX_CANDIDATES 6000
+#define MIN_GAIN       10.0f      /* a jump must get us this much further   */
+#define MAX_STEPS      60000000L
+#define MAX_ROUNDS     400
 
 typedef struct {
     float x, y, vy, rot;
+    int   step;                /* physics steps executed so far          */
 } Snapshot;
 
 typedef struct {
-    float x;
-    float reach;
-    int   snap;
+    Player    p;
+    int       step;            /* physics steps executed so far          */
+    JumpPoint plan[MAX_PLAN];
+    int       plan_len;
+} Node;
+
+typedef struct {
+    Node  node;
+    float reach;               /* how far a plain run from `node` gets    */
 } Candidate;
+
+static long g_budget;
 
 typedef struct {
     float best;
     bool  finished;
 } RunResult;
 
-/* Runs the level from `start`, pressing jump only on the very first frame if
- * `jump_first` is set, and records every grounded frame into `snaps`. */
-static RunResult run(const Level *l, Player start, bool jump_first,
+/* Runs forward from `start` without jumping, and records every grounded frame
+ * into `snaps` (at most one every SNAP_STEP pixels). */
+static RunResult run(const Level *l, Player start, int start_step,
                      Snapshot *snaps, int *snap_count, int snap_cap)
 {
     RunResult res = { start.x, false };
     Player p = start;
-    bool first = true;
+    int step = start_step;
 
     while (g_budget > 0) {
         g_budget--;
-        bool hold = first && jump_first;
-        first = false;
-
-        bool ok = player_step(l, &p, hold, PHYS_DT);
+        bool ok = player_step(l, &p, false, PHYS_DT);
+        step++;                 /* `step` is now the next index to consume */
         if (p.x > res.best) {
             res.best = p.x;
         }
@@ -64,7 +73,8 @@ static RunResult run(const Level *l, Player start, bool jump_first,
         if (!ok) {
             break;
         }
-        if (p.on_ground && snaps && *snap_count < snap_cap) {
+        /* only frames where a jump is actually possible are interesting */
+        if (snaps && p.on_ground && *snap_count < snap_cap) {
             if (*snap_count == 0 ||
                 p.x - snaps[*snap_count - 1].x >= SNAP_STEP) {
                 Snapshot *s = &snaps[(*snap_count)++];
@@ -72,22 +82,17 @@ static RunResult run(const Level *l, Player start, bool jump_first,
                 s->y = p.y;
                 s->vy = p.vy;
                 s->rot = p.rot;
+                s->step = step;
             }
         }
+    }
+    if (p.finished) {
+        res.finished = true;
     }
     return res;
 }
 
-static int cmp_candidate(const void *a, const void *b)
-{
-    const Candidate *ca = (const Candidate *)a;
-    const Candidate *cb = (const Candidate *)b;
-    if (ca->reach < cb->reach) return 1;
-    if (ca->reach > cb->reach) return -1;
-    return 0;
-}
-
-static Player player_from(const Snapshot *s)
+static Player player_at(const Snapshot *s)
 {
     Player p;
     memset(&p, 0, sizeof(p));
@@ -100,135 +105,209 @@ static Player player_from(const Snapshot *s)
     return p;
 }
 
-/* Executes one jump from a grounded state and returns the state right after
- * it - this is what the search recurses into. */
-static Player do_jump(const Level *l, Player from)
+static int cmp_candidate(const void *a, const void *b)
 {
-    from.alive = true;
-    player_step(l, &from, true, PHYS_DT);
-    return from;
+    const Candidate *ca = (const Candidate *)a;
+    const Candidate *cb = (const Candidate *)b;
+    if (ca->reach < cb->reach) return 1;
+    if (ca->reach > cb->reach) return -1;
+    return 0;
 }
 
-static bool solve_rec(const Level *l, Player start, int depth, int max_jumps)
+static void push_candidate(Candidate *cands, int *count, const Node *base,
+                           JumpPoint jump, Player after_jump, float reach)
 {
-    Snapshot *snaps = (Snapshot *)malloc(sizeof(Snapshot) * MAX_SNAPS);
-    Candidate *cands = (Candidate *)malloc(sizeof(Candidate) * MAX_SNAPS);
-    if (!snaps || !cands) {
-        free(snaps);
-        free(cands);
-        return false;
+    if (*count >= MAX_CANDIDATES || base->plan_len >= MAX_PLAN) {
+        return;
     }
-
-    int snap_count = 0;
-    RunResult plain = run(l, start, false, snaps, &snap_count, MAX_SNAPS);
-    if (plain.finished) {
-        g_plan_len = depth;
-        free(snaps);
-        free(cands);
-        return true;
-    }
-    if (depth >= max_jumps || g_budget <= 0 || snap_count == 0) {
-        free(snaps);
-        free(cands);
-        return false;
-    }
-
-    int n = 0;
-    for (int i = snap_count - 1; i >= 0; i--) {
-        Player from = player_from(&snaps[i]);
-        RunResult probe = run(l, from, true, NULL, NULL, 0);
-        if (probe.finished) {
-            g_plan[depth] = snaps[i].x;
-            g_plan_len = depth + 1;
-            free(snaps);
-            free(cands);
-            return true;
-        }
-        if (probe.best > plain.best + MIN_GAIN && n < MAX_SNAPS) {
-            cands[n].x = snaps[i].x;
-            cands[n].reach = probe.best;
-            cands[n].snap = i;
-            n++;
-        }
-        if (g_budget <= 0) {
-            break;
-        }
-    }
-
-    qsort(cands, (size_t)n, sizeof(Candidate), cmp_candidate);
-
-    if (getenv("GD_BOT_DEBUG")) {
-        fprintf(stderr, "depth %d start x=%.1f plain death x=%.1f cands=%d:",
-                depth, start.x, plain.best, n);
-        for (int i = 0; i < n && i < 6; i++) {
-            fprintf(stderr, " [%.0f->%.0f]", cands[i].x, cands[i].reach);
-        }
-        fprintf(stderr, "\n");
-    }
-
-    int tried = 0;
-    float tried_x[MAX_CANDIDATES];
-    for (int i = 0; i < n && tried < MAX_CANDIDATES; i++) {
-        /* snapshots are dense, so skip jumps that start almost at the same
-         * place as one we already tried */
-        bool dup = false;
-        for (int j = 0; j < tried; j++) {
-            if (SDL_fabsf(cands[i].x - tried_x[j]) < 2.0f) {
-                dup = true;
-                break;
-            }
-        }
-        if (dup) {
-            continue;
-        }
-
-        Player from = do_jump(l, player_from(&snaps[cands[i].snap]));
-        g_plan[depth] = cands[i].x;
-        tried_x[tried++] = cands[i].x;
-        if (!from.alive) {
-            continue;
-        }
-        if (solve_rec(l, from, depth + 1, max_jumps)) {
-            free(snaps);
-            free(cands);
-            return true;
-        }
-        if (g_budget <= 0) {
-            break;
-        }
-    }
-
-    free(snaps);
-    free(cands);
-    return false;
+    Candidate *c = &cands[(*count)++];
+    c->node.p = after_jump;
+    c->node.step = jump.step + 1;
+    memcpy(c->node.plan, base->plan, sizeof(JumpPoint) * (size_t)base->plan_len);
+    c->node.plan[base->plan_len] = jump;
+    c->node.plan_len = base->plan_len + 1;
+    c->reach = reach;
 }
 
-bool level_solve(const Level *l, float *jump_x, int max_jumps, int *jump_count,
+bool level_solve(const Level *l, JumpPoint *jump_x, int max_jumps, int *jump_count,
                  long *nodes, float *reach)
 {
     Player start;
     player_reset(&start, l);
 
-    g_plan_len = 0;
     g_budget = MAX_STEPS;
 
-    bool ok = solve_rec(l, start, 0, SDL_min(max_jumps, MAX_PLAN));
+    Candidate *cands = (Candidate *)malloc(sizeof(Candidate) * MAX_CANDIDATES);
+    Snapshot *snaps = (Snapshot *)malloc(sizeof(Snapshot) * MAX_SNAPS);
+    Node *beam = (Node *)malloc(sizeof(Node) * BEAM_WIDTH);
+    Node *next = (Node *)malloc(sizeof(Node) * BEAM_WIDTH);
+    bool ok = false;
 
-    if (jump_count) {
-        *jump_count = ok ? g_plan_len : 0;
+    if (!cands || !snaps || !beam || !next) {
+        free(cands);
+        free(snaps);
+        free(beam);
+        free(next);
+        return false;
     }
+
+    memset(&beam[0], 0, sizeof(Node));
+    beam[0].p = start;
+    beam[0].plan_len = 0;
+    int beam_count = 1;
+    int rounds = 0;
+
+    while (beam_count > 0 && rounds++ < MAX_ROUNDS && g_budget > 0) {
+        int cand_count = 0;
+
+        for (int b = 0; b < beam_count; b++) {
+            Node *base = &beam[b];
+            int snap_count = 0;
+            RunResult plain = run(l, base->p, base->step, snaps, &snap_count,
+                                  MAX_SNAPS);
+
+            if (plain.finished) {
+                memcpy(jump_x, base->plan, sizeof(JumpPoint) * (size_t)base->plan_len);
+                if (jump_count) *jump_count = base->plan_len;
+                ok = true;
+                goto done;
+            }
+
+            for (int i = 0; i < snap_count && g_budget > 0; i++) {
+                Player jumper = player_at(&snaps[i]);
+                JumpPoint jump = { snaps[i].step, snaps[i].x };
+                int jump_step = snaps[i].step;
+                bool alive = player_step(l, &jumper, true, PHYS_DT);
+                if (!alive) {
+                    continue;
+                }
+                if (jumper.finished) {
+                    push_candidate(cands, &cand_count, base, jump, jumper,
+                                   l->finish_x);
+                    continue;
+                }
+                JumpPoint *unused = NULL;
+                (void)unused;
+                RunResult probe = run(l, jumper, jump_step + 1, NULL, NULL, 0);
+                if (probe.finished) {
+                    push_candidate(cands, &cand_count, base, jump, jumper,
+                                   l->finish_x);
+                    continue;
+                }
+                if (probe.best > plain.best + MIN_GAIN) {
+                    push_candidate(cands, &cand_count, base, jump, jumper,
+                                   probe.best);
+                }
+            }
+        }
+
+        if (cand_count == 0) {
+            break;
+        }
+
+        qsort(cands, (size_t)cand_count, sizeof(Candidate), cmp_candidate);
+
+        /* keep the best, but do not keep two states that start almost at the
+         * same place - they lead to the same future */
+        int kept = 0;
+        for (int i = 0; i < cand_count && kept < BEAM_WIDTH; i++) {
+            bool dup = false;
+            for (int k = 0; k < kept; k++) {
+                if (SDL_fabsf(cands[i].node.p.x - next[k].p.x) < 6.0f &&
+                    SDL_fabsf(cands[i].node.p.y - next[k].p.y) < 6.0f) {
+                    dup = true;
+                    break;
+                }
+            }
+            if (dup) {
+                continue;
+            }
+            next[kept++] = cands[i].node;
+            if (cands[i].reach >= l->finish_x) {
+                if (getenv("GD_BOT_DEBUG")) {
+                    fprintf(stderr, "success: plan_len=%d state x=%.1f step=%d\n",
+                            cands[i].node.plan_len, cands[i].node.p.x,
+                            cands[i].node.step);
+                    for (int d = 0; d < cands[i].node.plan_len && d < 16; d++) {
+                        fprintf(stderr, "  plan[%d] step=%d x=%.1f\n", d,
+                                cands[i].node.plan[d].step, cands[i].node.plan[d].x);
+                    }
+                }
+                memcpy(jump_x, cands[i].node.plan,
+                       sizeof(JumpPoint) * (size_t)cands[i].node.plan_len);
+                if (jump_count) *jump_count = cands[i].node.plan_len;
+                ok = true;
+                goto done;
+            }
+        }
+
+        Node *tmp = beam;
+        beam = next;
+        next = tmp;
+        beam_count = kept;
+
+        if (getenv("GD_BOT_DEBUG")) {
+            fprintf(stderr, "round %d: beam %d, best x=%.0f\n", rounds, beam_count,
+                    kept ? beam[0].p.x : 0.0f);
+        }
+    }
+
+done:
+    if (ok) {
+        /* Never trust the search: replay the plan with the real physics and
+         * make sure it really reaches the finish line. */
+        Player p;
+        player_reset(&p, l);
+        int idx = 0;
+        int total = jump_count ? *jump_count : 0;
+        bool finished = false;
+        for (int step = 0; step < 2000000; step++) {
+            bool hold = (idx < total && jump_x[idx].step == step);
+            if (hold) {
+                idx++;
+            }
+            bool alive = player_step(l, &p, hold, PHYS_DT);
+            if (p.finished) {
+                finished = true;
+                break;
+            }
+            if (!alive) {
+                break;
+            }
+        }
+        if (!finished) {
+            if (getenv("GD_BOT_DEBUG")) {
+                fprintf(stderr, "replay check FAILED at x=%.1f (jump %d of %d)\n",
+                        p.x, idx, total);
+            }
+            ok = false;
+        } else if (getenv("GD_BOT_DEBUG")) {
+            fprintf(stderr, "replay check OK\n");
+        }
+    }
+
+    if (ok && jump_count && *jump_count > max_jumps) {
+        /* the caller asked for a smaller plan than we found */
+        ok = false;
+    }
+
     if (nodes) {
         *nodes = MAX_STEPS - g_budget;
     }
     if (reach) {
         long saved = g_budget;
         g_budget = 4000000L;
-        RunResult r = run(l, start, false, NULL, NULL, 0);
+        RunResult r = run(l, start, 0, NULL, NULL, 0);
         *reach = r.finished ? l->finish_x : r.best;
         g_budget = saved;
     }
-    if (ok && jump_x) {
-        memcpy(jump_x, g_plan, sizeof(float) * (size_t)g_plan_len);
+    if (!ok && jump_count) {
+        *jump_count = 0;
     }
+
+    free(cands);
+    free(snaps);
+    free(beam);
+    free(next);
     return ok;
 }

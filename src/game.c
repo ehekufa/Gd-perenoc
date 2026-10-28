@@ -105,11 +105,13 @@ static SDL_Texture *make_white_texture(SDL_Renderer *ren)
     return t;
 }
 
-bool game_init(Game *g, bool headless, int w, int h)
+bool game_init(Game *g, bool headless, int w, int h,
+               const char *level_path)
 {
     memset(g, 0, sizeof(*g));
     g->best_progress = 0.0f;
     g->state = STATE_PLAY;
+    g->level_path = (level_path && *level_path) ? level_path : DEFAULT_LEVEL;
 
     if (headless) {
         g->headless_surface = SDL_CreateSurface(w, h, SDL_PIXELFORMAT_XRGB8888);
@@ -135,9 +137,25 @@ bool game_init(Game *g, bool headless, int w, int h)
 
     g->tex_blocks = texture_load(g->renderer, "textures/blocks.png");
     g->tex_cube = texture_load(g->renderer, "textures/cube.png");
+    /* The spike sprite is optional: drop any of these files into
+     * assets/textures/ and it is used for the spikes.  Without one the spikes
+     * are drawn procedurally. */
+    static const char *spike_files[] = {
+        "textures/spike.png",
+        "textures/spike1.png",
+        "textures/Spike1.png",
+        "textures/Spike.png",
+        "textures/spikes.png",
+    };
+    for (size_t i = 0; i < SDL_arraysize(spike_files) && !g->tex_spike; i++) {
+        g->tex_spike = texture_load_optional(g->renderer, spike_files[i]);
+    }
     g->tex_white = make_white_texture(g->renderer);
 
-    level_build(&g->level);
+    if (!level_load(&g->level, g->level_path)) {
+        SDL_Log("Falling back to the built in level");
+        level_build(&g->level);
+    }
     player_reset(&g->player, &g->level);
     particles_clear(g);
 
@@ -145,18 +163,26 @@ bool game_init(Game *g, bool headless, int w, int h)
         audio_init(g);
     }
 
-    /* Make sure the level is actually beatable and remember the solution so
-     * that the demo mode can play the level for us. */
-    static float jumps[128];
+    return true;
+}
+
+/* The autopilot solution is only needed by the demo mode (F1 / --autoplay),
+ * and it takes a moment to compute, so it is done on demand. */
+void game_compute_autopilot(Game *g)
+{
+    static JumpPoint jumps[MAX_AUTO_JUMPS];
     int count = 0;
-    if (level_solve(&g->level, jumps, 128, &count, NULL, NULL)) {
+
+    if (g->auto_jumps) {
+        return;
+    }
+    if (level_solve(&g->level, jumps, MAX_AUTO_JUMPS, &count, NULL, NULL)) {
         g->auto_jumps = jumps;
         g->auto_jump_count = count;
         SDL_Log("Autopilot computed %d jumps", count);
     } else {
         SDL_Log("WARNING: autopilot could not beat the level");
     }
-    return true;
 }
 
 void game_shutdown(Game *g)
@@ -164,6 +190,7 @@ void game_shutdown(Game *g)
     audio_shutdown(g);
     if (g->tex_blocks) SDL_DestroyTexture(g->tex_blocks);
     if (g->tex_cube) SDL_DestroyTexture(g->tex_cube);
+    if (g->tex_spike) SDL_DestroyTexture(g->tex_spike);
     if (g->tex_white) SDL_DestroyTexture(g->tex_white);
     if (g->renderer) SDL_DestroyRenderer(g->renderer);
     if (g->window) SDL_DestroyWindow(g->window);
@@ -180,6 +207,7 @@ void game_respawn(Game *g)
     g->state = STATE_PLAY;
     g->state_timer = 0.0f;
     g->auto_jump_index = 0;
+    g->phys_step = 0;
     g->run_time = 0.0f;
     g->attempts++;
     g->flash = 0.0f;
@@ -252,18 +280,24 @@ void game_update(Game *g, bool hold, float dt)
     while (g->phys_acc >= PHYS_DT && guard++ < 64) {
         g->phys_acc -= PHYS_DT;
 
-        /* autopilot: press jump on the exact physics frame the solver used */
+        /* autopilot: press jump on the exact physics step the solver used */
         bool step_hold = hold;
         if (g->autoplay) {
             step_hold = false;
+            while (g->auto_jumps &&
+                   g->auto_jump_index < g->auto_jump_count &&
+                   g->auto_jumps[g->auto_jump_index].step < g->phys_step) {
+                /* we somehow missed a decision, skip it instead of stalling */
+                g->auto_jump_index++;
+            }
             if (g->auto_jumps &&
                 g->auto_jump_index < g->auto_jump_count &&
-                g->player.on_ground &&
-                g->player.x + 0.5f >= g->auto_jumps[g->auto_jump_index]) {
+                g->auto_jumps[g->auto_jump_index].step == g->phys_step) {
                 step_hold = true;
                 g->auto_jump_index++;
             }
         }
+        g->phys_step++;
 
         bool was_ground = g->player.on_ground;
         bool ok = player_step(&g->level, &g->player, step_hold, PHYS_DT);
@@ -439,6 +473,12 @@ static void draw_spike(Game *g, const Obj *o)
     }
     float w = o->w, h = o->h;
 
+    if (g->tex_spike) {
+        SDL_FRect dst = { x, y, w, h };
+        SDL_RenderTexture(ren, g->tex_spike, NULL, &dst);
+        return;
+    }
+
     SDL_Vertex v[3];
     int idx[3] = { 0, 1, 2 };
 
@@ -604,8 +644,8 @@ void render_ui(Game *g)
     }
     if (fade > 0.0f && g->state == STATE_PLAY) {
         SDL_Color c = { 245, 246, 255, (Uint8)(255 * fade) };
-        font_draw_shadow(ren, (VIEW_W - font_width(3.0f, LEVEL_NAME)) * 0.5f,
-                         96.0f, 3.0f, LEVEL_NAME, c);
+        font_draw_shadow(ren, (VIEW_W - font_width(3.0f, g->level.name)) * 0.5f,
+                         96.0f, 3.0f, g->level.name, c);
         SDL_snprintf(buf, sizeof(buf), "LEVEL 1");
         SDL_Color c2 = { 150, 190, 255, (Uint8)(220 * fade) };
         font_draw_shadow(ren, (VIEW_W - font_width(1.6f, buf)) * 0.5f, 148.0f,

@@ -18,6 +18,7 @@ typedef struct {
     bool no_autoplay;
     int  seconds;
     const char *screenshot;
+    const char *level;
     int  shot_time_ms;
     int  width, height;
 } Options;
@@ -33,6 +34,8 @@ static void parse_args(Options *o, int argc, char **argv)
             o->selftest = o->headless = true;
         } else if (!strcmp(argv[i], "--autoplay")) {
             o->autoplay = true;
+        } else if (!strcmp(argv[i], "--level") && i + 1 < argc) {
+            o->level = argv[++i];
         } else if (!strcmp(argv[i], "--manual")) {
             o->no_autoplay = true;
         } else if (!strcmp(argv[i], "--headless")) {
@@ -54,6 +57,7 @@ static void parse_args(Options *o, int argc, char **argv)
                    "  --selftest            verify the level with the autopilot\n"
                    "  --autoplay            let the autopilot play\n"
                    "  --manual              do not autoplay in --screenshot mode\n"
+                   "  --level FILE.lvl      play a custom level\n"
                    "  --headless            no window (needs --screenshot)\n"
                    "  --screenshot FILE     render one frame to FILE.bmp\n"
                    "  --shot-time MS        frame time for --screenshot\n"
@@ -63,19 +67,86 @@ static void parse_args(Options *o, int argc, char **argv)
     }
 }
 
+/* Checks the .lvl parser on tiny inline levels. */
+static int selftest_parser(void)
+{
+    Level l;
+    int failures = 0;
+
+    if (!level_load_from_text(&l,
+            "!name TEST LEVEL\n"
+            ".2.\n"
+            "111\n", "inline")) {
+        printf("parser: simple level failed to load\n");
+        return 1;
+    }
+    if (l.count != 2) {
+        printf("parser: expected 2 objects, got %d\n", l.count);
+        failures++;
+    }
+    if (l.count == 2) {
+        /* one merged block 3 cells wide + one spike */
+        bool block = l.objs[0].kind == OBJ_BLOCK && l.objs[0].w == 3 * CELL;
+        bool spike = l.objs[1].kind == OBJ_SPIKE && l.objs[1].x == CELL;
+        if (!block || !spike) {
+            printf("parser: wrong object geometry\n");
+            failures++;
+        }
+    }
+    if (SDL_strcmp(l.name, "TEST LEVEL") != 0) {
+        printf("parser: !name directive ignored (%s)\n", l.name);
+        failures++;
+    }
+    level_free(&l);
+
+    /* a tall wall must become one block object, not a stack of cells */
+    if (!level_load_from_text(&l, "1\n1\n1\n", "wall")) {
+        printf("parser: vertical level failed to load\n");
+        return 1;
+    }
+    if (l.count != 1 || l.objs[0].h != 3 * CELL) {
+        printf("parser: tall wall was not merged (%d objects)\n", l.count);
+        failures++;
+    }
+    level_free(&l);
+
+    /* unknown characters must be rejected */
+    if (level_load_from_text(&l, "1Z1\n", "bad")) {
+        printf("parser: unknown character was accepted\n");
+        failures++;
+        level_free(&l);
+    }
+
+    if (failures == 0) {
+        printf("parser: OK\n");
+    }
+    return failures;
+}
+
 static int run_selftest(const Options *o)
 {
     Level level;
-    level_build(&level);
+
+    int parser_failures = selftest_parser();
+    if (parser_failures) {
+        printf("SELFTEST FAILED: %d parser problem(s)\n", parser_failures);
+        return 1;
+    }
+
+    const char *path = o->level ? o->level : DEFAULT_LEVEL;
+    if (!level_load(&level, path)) {
+        printf("could not load level '%s', testing the built in fallback\n", path);
+        level_build(&level);
+    }
 
     printf("level: " LEVEL_NAME " (%.1f blocks, %.1f s)\n",
            level_length_blocks(&level), level_length_blocks(&level) * CELL / RUN_SPEED);
 
-    float jumps[128];
+    JumpPoint jumps[MAX_AUTO_JUMPS];
     int count = 0;
     long nodes = 0;
     float reach = 0.0f;
-    bool ok = level_solve(&level, jumps, 128, &count, &nodes, &reach);
+    bool ok = level_solve(&level, jumps, MAX_AUTO_JUMPS, &count, &nodes, &reach);
 
     printf("objects: %d, autopilot: %s, jumps: %d, sim steps: %ld, reach: %.0f px\n",
            level.count, ok ? "solved" : "FAILED", count, nodes, reach);
@@ -89,13 +160,14 @@ static int run_selftest(const Options *o)
     /* Replay the recorded jumps with the real game loop and make sure the
      * cube actually reaches the finish line. */
     Game g;
-    if (!game_init(&g, true, o->width, o->height)) {
+    if (!game_init(&g, true, o->width, o->height, o->level)) {
         printf("could not initialise the game: %s\n", SDL_GetError());
         level_free(&level);
         return 1;
     }
     g.autoplay = true;
     g.attempts = 1;
+    game_compute_autopilot(&g);
 
     float t = 0.0f;
     float dt = 1.0f / 60.0f;
@@ -125,12 +197,15 @@ static int run_selftest(const Options *o)
 static int run_screenshot(const Options *o)
 {
     Game g;
-    if (!game_init(&g, true, o->width, o->height)) {
+    if (!game_init(&g, true, o->width, o->height, o->level)) {
         printf("could not initialise the game: %s\n", SDL_GetError());
         return 1;
     }
     g.autoplay = !o->no_autoplay;
     g.attempts = 1;
+    if (g.autoplay) {
+        game_compute_autopilot(&g);
+    }
 
     float dt = 1.0f / 60.0f;
     float target = (float)o->shot_time_ms / 1000.0f;
@@ -171,7 +246,7 @@ int main(int argc, char **argv)
     }
 
     Game g;
-    if (!game_init(&g, false, opt.width, opt.height)) {
+    if (!game_init(&g, false, opt.width, opt.height, opt.level)) {
         fprintf(stderr, "could not start the game: %s\n", SDL_GetError());
         SDL_Quit();
         return 1;
@@ -202,6 +277,9 @@ int main(int argc, char **argv)
                 } else if (ev.key.key == SDLK_F1 && !ev.key.repeat) {
                     g.autoplay = !g.autoplay;
                     g.auto_jump_index = 0;
+                    if (g.autoplay) {
+                        game_compute_autopilot(&g);
+                    }
                 } else if (ev.key.key == SDLK_F2 && !ev.key.repeat) {
                     game_screenshot(&g, "screenshot.bmp");
                 } else if (ev.key.key == SDLK_SPACE && g.state == STATE_WIN) {

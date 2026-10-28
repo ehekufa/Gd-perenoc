@@ -9,8 +9,10 @@
 #include <stdbool.h>
 #include <SDL3/SDL.h>
 
-#define GAME_TITLE   "Point of No Return"
-#define LEVEL_NAME   "POINT OF NO RETURN"
+#define GAME_TITLE    "Point of No Return"
+#define LEVEL_NAME    "POINT OF NO RETURN"
+/* Levels are text files, see src/level.c for the format. */
+#define DEFAULT_LEVEL "levels/point_of_no_return.lvl"
 
 /* Logical resolution, everything is authored for this and letterboxed. */
 #define VIEW_W 1280
@@ -50,8 +52,18 @@ typedef struct {
     Obj  *objs;
     int   count;
     int   cap;
-    float finish_x;      /* x coordinate of the finish line           */
+    float finish_x;      /* x coordinate of the finish line            */
+    int   spawn_col;     /* column the cube starts in                  */
+    char  name[64];      /* level name, taken from the .lvl file       */
 } Level;
+
+/* One decision of the autopilot: press jump on physics step `step`
+ * (counted from the start of the attempt).  Exactness matters: a plan that
+ * only stores x coordinates drifts by a frame and breaks. */
+typedef struct {
+    int   step;
+    float x;             /* where the cube was standing, for debugging  */
+} JumpPoint;
 
 typedef struct {
     float x, y;          /* top-left corner of the hitbox             */
@@ -63,6 +75,7 @@ typedef struct {
     bool  was_airborne;  /* previous step state, used for dust FX     */
 } Player;
 
+#define MAX_AUTO_JUMPS 96
 #define MAX_PARTICLES 768
 
 typedef struct {
@@ -79,6 +92,7 @@ typedef struct {
     SDL_Renderer    *renderer;
     SDL_Texture     *tex_blocks;
     SDL_Texture     *tex_cube;
+    SDL_Texture     *tex_spike;   /* optional: assets/textures/spike.png */
     SDL_Texture     *tex_white;
     SDL_Surface     *headless_surface;
 
@@ -86,6 +100,8 @@ typedef struct {
     Player           player;
     Particle         particles[MAX_PARTICLES];
     int              particle_cursor;
+
+    const char      *level_path;
 
     float            cam_x, cam_y;
     float            shake_x, shake_y;
@@ -109,9 +125,10 @@ typedef struct {
 
     /* solution found by the verifier, used by the demo/autoplay mode */
     bool             autoplay;
-    const float     *auto_jumps;
+    const JumpPoint *auto_jumps;
     int              auto_jump_count;
     int              auto_jump_index;
+    int              phys_step;       /* physics steps since the respawn */
 
     /* audio */
     SDL_AudioStream    *audio_stream;
@@ -127,6 +144,11 @@ enum {
 };
 
 /* ---------------------------------------------------------------- level */
+/* Loads one of the text ".lvl" levels (see src/level.c for the format). */
+bool  level_load(Level *level, const char *relpath);
+/* Same, but the level text is passed directly (used by tests). */
+bool  level_load_from_text(Level *level, const char *text, const char *label);
+/* Built in fallback level, used when the .lvl file is missing. */
 void  level_build(Level *level);
 void  level_free(Level *level);
 float level_length_blocks(const Level *level);
@@ -138,10 +160,13 @@ bool  player_step(const Level *level, Player *p, bool hold, float dt);
 float player_progress(const Level *level, const Player *p);
 
 /* ---------------------------------------------------------------- game  */
-bool  game_init(Game *g, bool headless, int w, int h);
+bool  game_init(Game *g, bool headless, int w, int h,
+                const char *level_path);
 void  game_shutdown(Game *g);
 void  game_update(Game *g, bool hold, float dt);
 void  game_respawn(Game *g);
+/* Plays the level with the autopilot (demo mode). */
+void  game_compute_autopilot(Game *g);
 void  game_render(Game *g);
 void  game_screenshot(Game *g, const char *path);
 
@@ -173,10 +198,17 @@ enum { SFX_JUMP, SFX_DEATH, SFX_WIN, SFX_START, SFX_BLOCK };
 
 /* ------------------------------------------------------------- assets  */
 SDL_Texture *texture_load(SDL_Renderer *ren, const char *relpath);
+/* Same, but silently returns NULL when the file does not exist. */
+SDL_Texture *texture_load_optional(SDL_Renderer *ren, const char *relpath);
+/* Reads a file from the assets folder (or from disk next to the binary).
+ * The returned buffer is allocated with SDL_malloc. */
+void        *asset_load(const char *relpath, size_t *size);
+/* Returns the first existing path for an asset, or NULL. */
+const char  *asset_find(const char *relpath, char *buffer, size_t buffer_size);
 
 /* ----------------------------------------------------------------- bot  */
 /* Searches for a valid sequence of jumps that completes the level.       */
-bool  level_solve(const Level *level, float *jump_x, int max_jumps,
+bool  level_solve(const Level *level, JumpPoint *jumps, int max_jumps,
                   int *jump_count, long *nodes, float *reach);
 
 /* ---------------------------------------------------------------- util  */

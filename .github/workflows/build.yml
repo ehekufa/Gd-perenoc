@@ -35,8 +35,8 @@ jobs:
       - name: Render a gameplay screenshot
         run: |
           mkdir -p screenshots
-          ./build/point_of_no_return --screenshot screenshots/gameplay.bmp --shot-time 5200
-          ./build/point_of_no_return --screenshot screenshots/finish.bmp --shot-time 21500
+          ./build/point_of_no_return --screenshot screenshots/gameplay.bmp --shot-time 9000
+          ./build/point_of_no_return --screenshot screenshots/finish.bmp --shot-time 64000
 
       - uses: actions/upload-artifact@v4
         with:

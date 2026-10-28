@@ -49,10 +49,24 @@ static bool touches_hazard(const Level *l, const Player *p)
 
 void player_reset(Player *p, const Level *l)
 {
-    (void)l;
     memset(p, 0, sizeof(*p));
-    p->x = 6.0f * CELL;
-    p->y = GROUND_Y - PLAYER_HIT;
+    p->x = (float)l->spawn_col * CELL;
+
+    /* Start on top of whatever is at the spawn point: levels may have a
+     * floor made of blocks instead of the plain ground. */
+    float floor_y = GROUND_Y;
+    for (int i = 0; i < l->count; i++) {
+        const Obj *o = &l->objs[i];
+        if (o->kind != OBJ_BLOCK) {
+            continue;
+        }
+        if (o->x < p->x + PLAYER_HIT && o->x + o->w > p->x &&
+            o->y < floor_y) {
+            floor_y = o->y;
+        }
+    }
+
+    p->y = floor_y - PLAYER_HIT;
     p->vy = 0.0f;
     p->rot = 0.0f;
     p->on_ground = true;
@@ -62,7 +76,7 @@ void player_reset(Player *p, const Level *l)
 
 float player_progress(const Level *l, const Player *p)
 {
-    float start = 6.0f * CELL;
+    float start = (float)l->spawn_col * CELL;
     float t = (p->x - start) / (l->finish_x - start);
     if (t < 0.0f) return 0.0f;
     if (t > 1.0f) return 1.0f;
@@ -78,8 +92,9 @@ bool player_step(const Level *l, Player *p, bool hold, float dt)
     }
 
     p->was_airborne = !p->on_ground;
+    bool was_grounded = p->on_ground;
 
-    if (p->on_ground) {
+    if (was_grounded) {
         /* Snap the cube to a right angle while it is rolling. */
         float target = roundf(p->rot / 90.0f) * 90.0f;
         p->rot += (target - p->rot) * SDL_min(1.0f, dt * 18.0f);
@@ -88,21 +103,30 @@ bool player_step(const Level *l, Player *p, bool hold, float dt)
         }
         if (hold) {
             p->vy = JUMP_VELOCITY;
-            p->on_ground = false;
+            was_grounded = false;
         }
     } else {
         p->rot += SPIN_SPEED * dt;
     }
 
-    if (!p->on_ground) {
+    if (!was_grounded) {
         p->vy += GRAVITY * dt;
         if (p->vy > MAX_FALL_SPEED) {
             p->vy = MAX_FALL_SPEED;
         }
+    } else {
+        p->vy = 0.0f;
     }
 
-    /* ---- vertical sweep ---- */
-    p->y += p->vy * dt;
+    /* ---- vertical sweep ----
+     * A resting cube is moved down by a hair every step, otherwise it would
+     * hover exactly on the surface, never overlap it again and `on_ground`
+     * would flicker on and off. */
+    float move = p->vy * dt;
+    if (was_grounded && move < 1.0f) {
+        move = 1.0f;
+    }
+    p->y += move;
     p->on_ground = false;
 
     if (p->vy >= 0.0f) {
@@ -115,7 +139,7 @@ bool player_step(const Level *l, Player *p, bool hold, float dt)
                 continue;
             }
             /* Only land on the block when we come from above. */
-            if (p->y + PLAYER_HIT - p->vy * dt <= o->y + 1.0f) {
+            if (p->y + PLAYER_HIT - move <= o->y + 1.0f) {
                 p->y = o->y - PLAYER_HIT;
                 p->vy = 0.0f;
                 p->on_ground = true;
