@@ -7,7 +7,7 @@
 * блоки (платформы) — спрайт `Blocks 1.png` (лежит в `assets/textures/blocks.png`)
 * уровень — текстовый файл `assets/levels/point_of_no_return.lvl`
   (`. ` пусто, `1` блок, `2` шип), см. [docs/LEVEL_FORMAT.md](docs/LEVEL_FORMAT.md)
-* шип — ваш спрайт `Thorn1.png` (лежит в `assets/textures/thorn.png`);
+* шип — ваш спрайт `Spike1.png` (лежит в `assets/textures/Spike1.png`);
   если файла не будет, шип нарисуется кодом
 * прогресс-бар, взрывы частиц, звуки — рисуются и синтезируются кодом,
   никаких других файлов игре не нужно
@@ -95,7 +95,7 @@ src/audio.c       синтез звуков (прыжок, смерть, поб�
 src/font.c        встроенный шрифт 5×7 (никаких файлов шрифтов)
 src/assets.c      загрузка PNG через stb_image и SDL3 (десктоп и assets APK)
 assets/textures/  cube.png (Cube1.png), blocks.png (Blocks 1.png),
-                  thorn.png (Thorn1.png — шип)
+                  Spike1.png (Spike1.png — шип), thorn.png (старое имя)
 android/          Android-проект SDL3 + Gradle
 scripts/          fetch_sdl.sh, build_apk.sh, make_icons.py
 ```
@@ -126,9 +126,9 @@ scripts/          fetch_sdl.sh, build_apk.sh, make_icons.py
 
 ### Свой спрайт шипа
 
-Шипы рисуются спрайтом `assets/textures/thorn.png` — это ваш `Thorn1.png`.
-Чтобы заменить его, положите PNG в `assets/textures/` с именем `thorn.png`
-(или `Thorn1.png`, `spike.png`, `Spike1.png`, `spikes.png`) — игра подхватит
+Шипы рисуются спрайтом `assets/textures/Spike1.png` — это ваш `Spike1.png`
+(он же `Thorn1.png`). Чтобы заменить его, положите PNG в `assets/textures/`
+с именем `Spike1.png` (или `Thorn1.png`, `spike.png`, `spikes.png`) — игра подхватит
 его автоматически: спрайт вписывается в клетку 48×48 и повторяется на каждом
 шипе. Если файла нет, шип рисуется кодом.
 

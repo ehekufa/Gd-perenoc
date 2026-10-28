@@ -141,11 +141,11 @@ bool game_init(Game *g, bool headless, int w, int h,
      * assets/textures/ and it is used for the spikes.  Without one the spikes
      * are drawn procedurally. */
     static const char *spike_files[] = {
-        "textures/thorn.png",     /* Thorn1.png, the player's own spike */
-        "textures/Thorn1.png",
+        "textures/Spike1.png",    /* Spike1.png,       the player's spike */
+        "textures/Thorn1.png",    /* Thorn1.png, same sprite, older name  */
         "textures/spike.png",
         "textures/spike1.png",
-        "textures/Spike1.png",
+        "textures/thorn.png",
         "textures/Spike.png",
         "textures/spikes.png",
     };
