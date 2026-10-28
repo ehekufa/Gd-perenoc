@@ -229,10 +229,24 @@ int main(int argc, char **argv)
         SDL_SetHint(SDL_HINT_AUDIO_DRIVER, "dummy");
     }
 
-    if (!SDL_Init(SDL_INIT_VIDEO | SDL_INIT_AUDIO | SDL_INIT_GAMEPAD)) {
-        fprintf(stderr, "SDL_Init failed: %s\n", SDL_GetError());
+    /* Video is the only subsystem the game cannot live without.  Audio and
+     * gamepads are optional: on a phone a missing audio driver must not stop
+     * the game from starting (that is what used to make it quit on launch). */
+    if (!SDL_Init(SDL_INIT_VIDEO)) {
+        SDL_Log("SDL_Init(SDL_INIT_VIDEO) failed: %s", SDL_GetError());
         return 1;
     }
+    if (!SDL_InitSubSystem(SDL_INIT_AUDIO)) {
+        SDL_Log("Audio is not available, continuing without sound: %s",
+                SDL_GetError());
+    }
+    if (!SDL_InitSubSystem(SDL_INIT_GAMEPAD)) {
+        SDL_Log("Gamepad support is not available: %s", SDL_GetError());
+    }
+
+    SDL_Log("Point of No Return: video driver = %s, audio driver = %s",
+            SDL_GetCurrentVideoDriver(),
+            SDL_GetCurrentAudioDriver() ? SDL_GetCurrentAudioDriver() : "none");
 
     if (opt.selftest) {
         int rc = run_selftest(&opt);

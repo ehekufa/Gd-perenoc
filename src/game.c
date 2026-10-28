@@ -123,12 +123,19 @@ bool game_init(Game *g, bool headless, int w, int h,
         g->window = SDL_CreateWindow(GAME_TITLE, w, h,
                                      SDL_WINDOW_RESIZABLE | SDL_WINDOW_HIGH_PIXEL_DENSITY);
         if (!g->window) {
+            SDL_Log("SDL_CreateWindow failed: %s", SDL_GetError());
             return false;
         }
         SDL_SetWindowMinimumSize(g->window, 640, 360);
         g->renderer = SDL_CreateRenderer(g->window, NULL);
+        if (!g->renderer) {
+            SDL_Log("Could not create a GPU renderer (%s), using the software one",
+                    SDL_GetError());
+            g->renderer = SDL_CreateRenderer(g->window, "software");
+        }
     }
     if (!g->renderer) {
+        SDL_Log("No renderer available: %s", SDL_GetError());
         return false;
     }
     SDL_SetRenderVSync(g->renderer, 1);
@@ -673,8 +680,6 @@ void render_ui(Game *g)
     font_draw_shadow(ren, 26.0f, 26.0f, 1.8f, buf, COL_DIM);
 
     if (g->state == STATE_PLAY) {
-        const char *hint = SDL_GetHint(SDL_HINT_TOUCH_MOUSE_EVENTS) ? "" : "";
-        (void)hint;
         font_draw_shadow(ren, 26.0f, VIEW_H - 46.0f, 1.6f,
                          "SPACE OR TAP TO JUMP", COL_DIM);
     }
