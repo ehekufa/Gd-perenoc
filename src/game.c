@@ -775,12 +775,14 @@ static void render_menu(Game *g)
 
     float t = g->total_time;
 
-    /* title */
+    /* title (the pause screen has its own heading) */
     SDL_Color title = { 245, 246, 255, 255 };
-    font_draw_shadow(ren, (VIEW_W - font_width(6.0f, "POINT OF NO RETURN")) * 0.5f,
-                     70.0f, 6.0f, "POINT OF NO RETURN", title);
-    font_draw_shadow(ren, (VIEW_W - font_width(2.0f, "GEOMETRY DASH STYLE")) * 0.5f,
-                     150.0f, 2.0f, "GEOMETRY DASH STYLE", COL_DIM);
+    if (g->menu_state != MENU_PAUSE) {
+        font_draw_shadow(ren, (VIEW_W - font_width(6.0f, "POINT OF NO RETURN")) * 0.5f,
+                         70.0f, 6.0f, "POINT OF NO RETURN", title);
+        font_draw_shadow(ren, (VIEW_W - font_width(2.0f, "GEOMETRY DASH STYLE")) * 0.5f,
+                         150.0f, 2.0f, "GEOMETRY DASH STYLE", COL_DIM);
+    }
 
     if (g->menu_state == MENU_MAIN) {
         /* one big PLAY button */
@@ -821,7 +823,7 @@ static void render_menu(Game *g)
                          COL_DIM);
     } else if (g->menu_state == MENU_PAUSE) {
         font_draw_shadow(ren, (VIEW_W - font_width(5.0f, "PAUSED")) * 0.5f,
-                         VIEW_H * 0.20f, 5.0f, "PAUSED", COL_WHITE);
+                         VIEW_H * 0.13f, 5.0f, "PAUSED", COL_WHITE);
 
         SDL_snprintf(buf, sizeof(buf), "BEST %d%%   ATTEMPTS %d",
                      (int)(g->best_progress * 100.0f + 0.5f), g->attempts);
