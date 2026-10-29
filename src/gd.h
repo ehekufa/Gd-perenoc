@@ -93,6 +93,8 @@ typedef struct {
     SDL_Texture     *tex_blocks;
     SDL_Texture     *tex_cube;
     SDL_Texture     *tex_spike;   /* optional: assets/textures/spike.png */
+    SDL_Texture     *tex_background; /* optional: textures/background.png  */
+    SDL_Texture     *tex_ground;     /* optional: textures/ground.png      */
     SDL_Texture     *tex_white;
     SDL_Surface     *headless_surface;
 
@@ -125,6 +127,8 @@ typedef struct {
 
     /* solution found by the verifier, used by the demo/autoplay mode */
     bool             autoplay;
+    int              menu_sel;        /* highlighted entry in the menu    */
+    int              menu_state;      /* MenuState                         */
     const JumpPoint *auto_jumps;
     int              auto_jump_count;
     int              auto_jump_index;
@@ -140,7 +144,14 @@ enum {
     STATE_PLAY,
     STATE_DYING,
     STATE_DEAD,
-    STATE_WIN
+    STATE_WIN,
+    STATE_MENU          /* main menu / level select / pause menu */
+};
+
+enum {
+    MENU_MAIN,          /* big PLAY button                       */
+    MENU_LEVELS,        /* level select                          */
+    MENU_PAUSE          /* opened with Esc during the game       */
 };
 
 /* ---------------------------------------------------------------- level */
@@ -165,6 +176,13 @@ bool  game_init(Game *g, bool headless, int w, int h,
 void  game_shutdown(Game *g);
 void  game_update(Game *g, bool hold, float dt);
 void  game_respawn(Game *g);
+/* Starts the current level from the menu (resets attempts and stats). */
+void  game_start_level(Game *g);
+/* Menu navigation: move the highlight / activate the selected entry. */
+void  game_menu_move(Game *g, int delta);
+void  game_menu_activate(Game *g);
+/* Mouse/touch click at a logical screen position. */
+void  game_menu_point(Game *g, float x, float y);
 /* Plays the level with the autopilot (demo mode). */
 void  game_compute_autopilot(Game *g);
 void  game_render(Game *g);

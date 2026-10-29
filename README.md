@@ -5,6 +5,8 @@
 
 * кубик (игрок) — спрайт `Cube1.png` (лежит в `assets/textures/cube.png`)
 * блоки (платформы) — спрайт `Blocks 1.png` (лежит в `assets/textures/blocks.png`)
+* фон — спрайт `Background.png` (лежит в `assets/textures/background.png`)
+* земля — спрайт `Ground.png` (лежит в `assets/textures/ground.png`)
 * уровень — текстовый файл `assets/levels/point_of_no_return.lvl`
   (`. ` пусто, `1` блок, `2` шип), см. [docs/LEVEL_FORMAT.md](docs/LEVEL_FORMAT.md)
 * шип — ваш спрайт `Spike1.png` (лежит в `assets/textures/Spike1.png`);
@@ -16,8 +18,15 @@
 
 ## Как играть
 
+Игра стартует в меню: большая кнопка **PLAY** открывает выбор уровня,
+дальше — сам уровень. `Esc` (или потеря фокуса на телефоне) открывает меню паузы
+с кнопками **RESUME / RESTART / LEVEL SELECT**.
+
 | Действие | Клавиатура / мышь | Телефон |
 |---|---|---|
+| Меню: выбор пункта | `↑` / `↓` (`W` / `S`) | тап по кнопке |
+| Меню: подтвердить | `Space` / `Enter` / ЛКМ | тап по кнопке |
+| Меню: назад | `Esc` | — |
 | Прыжок | `Space` / `↑` / `W` / ЛКМ (или удержание) | тап по экрану (можно держать) |
 | Пауза | `Esc` | потеря фокуса / `Esc` |
 | Заново (с начала) | `R` | — |
@@ -72,7 +81,8 @@ ctest --test-dir build --output-on-failure
 ```
 
 Полезные ключи: `--selftest`, `--autoplay`, `--screenshot file.bmp --shot-time 5200`,
-`--manual` (не включать автопилот при скриншоте), `--size W H`, `--help`.
+`--menu main|levels|pause` (снять меню вместо игры), `--manual` (не включать
+автопилот при скриншоте), `--size W H`, `--help`.
 
 ## Сборка APK (Android)
 

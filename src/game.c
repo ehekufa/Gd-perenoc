@@ -110,7 +110,9 @@ bool game_init(Game *g, bool headless, int w, int h,
 {
     memset(g, 0, sizeof(*g));
     g->best_progress = 0.0f;
-    g->state = STATE_PLAY;
+    g->state = STATE_MENU;
+    g->menu_state = MENU_MAIN;
+    g->menu_sel = 0;
     g->level_path = (level_path && *level_path) ? level_path : DEFAULT_LEVEL;
 
     if (headless) {
@@ -159,6 +161,8 @@ bool game_init(Game *g, bool headless, int w, int h,
     for (size_t i = 0; i < SDL_arraysize(spike_files) && !g->tex_spike; i++) {
         g->tex_spike = texture_load_optional(g->renderer, spike_files[i]);
     }
+    g->tex_background = texture_load_optional(g->renderer, "textures/background.png");
+    g->tex_ground = texture_load_optional(g->renderer, "textures/ground.png");
     g->tex_white = make_white_texture(g->renderer);
 
     if (!level_load(&g->level, g->level_path)) {
@@ -200,6 +204,8 @@ void game_shutdown(Game *g)
     if (g->tex_blocks) SDL_DestroyTexture(g->tex_blocks);
     if (g->tex_cube) SDL_DestroyTexture(g->tex_cube);
     if (g->tex_spike) SDL_DestroyTexture(g->tex_spike);
+    if (g->tex_background) SDL_DestroyTexture(g->tex_background);
+    if (g->tex_ground) SDL_DestroyTexture(g->tex_ground);
     if (g->tex_white) SDL_DestroyTexture(g->tex_white);
     if (g->renderer) SDL_DestroyRenderer(g->renderer);
     if (g->window) SDL_DestroyWindow(g->window);
@@ -208,9 +214,21 @@ void game_shutdown(Game *g)
     memset(g, 0, sizeof(*g));
 }
 
+/* Puts the camera exactly where it belongs for the current player position.
+ * Without this the respawn looks broken: the cube is back at the start but the
+ * view stays where the player died. */
+static void camera_snap(Game *g)
+{
+    g->cam_x = g->player.x - VIEW_W * CAM_LEAD;
+    if (g->cam_x < 0.0f) {
+        g->cam_x = 0.0f;
+    }
+}
+
 void game_respawn(Game *g)
 {
     player_reset(&g->player, &g->level);
+    camera_snap(g);
     g->phys_acc = 0.0f;
     particles_clear(g);
     g->state = STATE_PLAY;
@@ -277,6 +295,11 @@ void game_update(Game *g, bool hold, float dt)
         return;
     }
 
+    if (g->state == STATE_MENU) {
+        particles_update(g, dt);
+        return;
+    }
+
     if (g->state != STATE_PLAY || g->paused) {
         return;
     }
@@ -336,9 +359,11 @@ void game_update(Game *g, bool hold, float dt)
         }
     }
 
-    /* camera */
-    float target = g->player.x - VIEW_W * CAM_LEAD;
-    if (target > g->cam_x) {
+    /* camera: follows forward smoothly and never lags behind the player */
+    float target = SDL_max(0.0f, g->player.x - VIEW_W * CAM_LEAD);
+    if (target < g->cam_x) {
+        g->cam_x = target;             /* snap backwards (should not happen) */
+    } else {
         g->cam_x += (target - g->cam_x) * SDL_min(1.0f, dt * 14.0f);
         if (target - g->cam_x < 1.0f) {
             g->cam_x = target;
@@ -382,6 +407,20 @@ static void draw_background(Game *g)
         }
     }
 
+    /* the player's own background (Background.png): tiled and slowed down so
+     * it reads as far away scenery */
+    if (g->tex_background) {
+        float tile = 480.0f;
+        float par2 = g->cam_x * 0.18f;
+        float off = fmodf(par2, tile);
+        for (float tx = -off - tile; tx < VIEW_W + tile; tx += tile) {
+            for (float ty = -40.0f; ty < GROUND_SCREEN_Y; ty += tile) {
+                SDL_FRect dst = { tx, ty, tile, tile };
+                SDL_RenderTexture(ren, g->tex_background, NULL, &dst);
+            }
+        }
+    }
+
     /* floating neon squares, deep parallax */
     for (int i = 0; i < 18; i++) {
         /* decorate: scattered, but deterministic */
@@ -409,6 +448,19 @@ static void draw_ground(Game *g)
     SDL_Color gbot = { 6, 4, 14, 255 };
     draw_gradient(ren, 0, GROUND_SCREEN_Y, VIEW_W, VIEW_H - GROUND_SCREEN_Y,
                   gtop, gbot);
+
+    /* the player's own ground (Ground.png), scrolling with the level */
+    if (g->tex_ground) {
+        float tile = CELL * 3.0f;
+        float off = fmodf(g->cam_x, tile);
+        for (float x = -off - tile; x < VIEW_W + tile; x += tile) {
+            SDL_FRect dst = { x, GROUND_SCREEN_Y, tile,
+                              VIEW_H - GROUND_SCREEN_Y };
+            SDL_RenderTexture(ren, g->tex_ground, NULL, &dst);
+        }
+        draw_rect_blend(ren, 0, GROUND_SCREEN_Y, VIEW_W,
+                        VIEW_H - GROUND_SCREEN_Y, 12, 8, 26, 110);
+    }
 
     /* the bright line that the cube runs on */
     SDL_SetRenderDrawColor(ren, 235, 240, 255, 255);
@@ -645,6 +697,213 @@ static void draw_progress_bar(Game *g)
     font_draw_shadow(ren, x + w + 14.0f, y - 2.0f, 2.0f, buf, COL_WHITE);
 }
 
+
+/* ------------------------------------------------------------- menu ---- */
+
+/* Levels offered in the level select.  There is one for now; adding a file to
+ * assets/levels and a line here is all it takes. */
+static const struct {
+    const char *path;
+    const char *title;
+} kLevels[] = {
+    { DEFAULT_LEVEL, "LEVEL 1  POINT OF NO RETURN" },
+};
+#define LEVEL_COUNT ((int)SDL_arraysize(kLevels))
+
+static void draw_button(Game *g, float x, float y, float w, float h,
+                        const char *label, bool selected, float scale)
+{
+    SDL_Renderer *ren = g->renderer;
+    if (selected) {
+        draw_rect_blend(ren, x - 4, y - 4, w + 8, h + 8, 120, 200, 255, 60);
+        draw_rect_blend(ren, x, y, w, h, 60, 120, 220, 235);
+    } else {
+        draw_rect_blend(ren, x, y, w, h, 24, 22, 52, 210);
+    }
+    SDL_SetRenderDrawColor(ren, selected ? 255 : 200,
+                           selected ? 255 : 210, 255, 255);
+    SDL_FRect r = { x, y, w, h };
+    SDL_RenderRect(ren, &r);
+
+    SDL_Color color = selected ? (SDL_Color){ 10, 12, 28, 255 } : COL_WHITE;
+    font_draw(ren, x + (w - font_width(scale, label)) * 0.5f,
+              y + (h - font_height(scale)) * 0.5f, scale, label, color);
+}
+
+/* Screen rectangles of the menu entries, shared by drawing and hit testing. */
+static int menu_hitboxes(Game *g, SDL_FRect *out, int max)
+{
+    int n = 0;
+    if (g->menu_state == MENU_MAIN) {
+        if (n < max) out[n++] = (SDL_FRect){ (VIEW_W - 460.0f) * 0.5f,
+                                            VIEW_H * 0.44f, 460.0f, 130.0f };
+    } else if (g->menu_state == MENU_LEVELS) {
+        for (int i = 0; i < LEVEL_COUNT && n < max; i++) {
+            out[n++] = (SDL_FRect){ (VIEW_W - 780.0f) * 0.5f,
+                                    VIEW_H * 0.38f + i * 94.0f, 780.0f, 76.0f };
+        }
+    } else if (g->menu_state == MENU_PAUSE) {
+        for (int i = 0; i < 3 && n < max; i++) {
+            out[n++] = (SDL_FRect){ (VIEW_W - 520.0f) * 0.5f,
+                                    VIEW_H * 0.40f + i * 88.0f, 520.0f, 72.0f };
+        }
+    }
+    return n;
+}
+
+void game_menu_point(Game *g, float x, float y)
+{
+    SDL_FRect boxes[8];
+    int n = menu_hitboxes(g, boxes, 8);
+    for (int i = 0; i < n; i++) {
+        const SDL_FRect *r = &boxes[i];
+        if (x >= r->x && x <= r->x + r->w && y >= r->y && y <= r->y + r->h) {
+            g->menu_sel = i;
+            game_menu_activate(g);
+            return;
+        }
+    }
+}
+
+static void render_menu(Game *g)
+{
+    SDL_Renderer *ren = g->renderer;
+    char buf[128];
+
+    /* dim whatever is behind (menu background or the paused game) */
+    draw_rect_blend(ren, 0, 0, VIEW_W, VIEW_H, 6, 5, 18, 170);
+
+    float t = g->total_time;
+
+    /* title */
+    SDL_Color title = { 245, 246, 255, 255 };
+    font_draw_shadow(ren, (VIEW_W - font_width(6.0f, "POINT OF NO RETURN")) * 0.5f,
+                     70.0f, 6.0f, "POINT OF NO RETURN", title);
+    font_draw_shadow(ren, (VIEW_W - font_width(2.0f, "GEOMETRY DASH STYLE")) * 0.5f,
+                     150.0f, 2.0f, "GEOMETRY DASH STYLE", COL_DIM);
+
+    if (g->menu_state == MENU_MAIN) {
+        /* one big PLAY button */
+        float w = 460.0f, h = 130.0f;
+        float x = (VIEW_W - w) * 0.5f, y = VIEW_H * 0.44f;
+        float pulse = 1.0f + 0.02f * sinf(t * 3.0f);
+        draw_button(g, x - (w * pulse - w) * 0.5f, y - (h * pulse - h) * 0.5f,
+                    w * pulse, h * pulse, "PLAY", true, 7.0f);
+
+        font_draw_shadow(ren, (VIEW_W - font_width(1.8f, "TAP OR PRESS SPACE")) * 0.5f,
+                         VIEW_H * 0.78f, 1.8f, "TAP OR PRESS SPACE",
+                         COL_DIM);
+    } else if (g->menu_state == MENU_LEVELS) {
+        font_draw_shadow(ren, (VIEW_W - font_width(3.0f, "SELECT LEVEL")) * 0.5f,
+                         VIEW_H * 0.27f, 3.0f, "SELECT LEVEL", COL_ACCENT);
+
+        float w = 780.0f, h = 76.0f, gap = 18.0f;
+        float x = (VIEW_W - w) * 0.5f;
+        float y = VIEW_H * 0.38f;
+        for (int i = 0; i < LEVEL_COUNT; i++) {
+            bool sel = (i == g->menu_sel);
+            draw_button(g, x, y + i * (h + gap), w, h, kLevels[i].title, sel,
+                        2.4f);
+        }
+        if (LEVEL_COUNT == 1) {
+            font_draw_shadow(ren, x + 26.0f, y + h + gap + 12.0f, 1.6f,
+                             "MORE LEVELS SOON - SEE DOCS/LEVEL_FORMAT.MD",
+                             COL_DIM);
+        }
+
+        float by = VIEW_H * 0.82f;
+        draw_button(g, (VIEW_W - 300.0f) * 0.5f, by, 300.0f, 60.0f, "BACK",
+                    false, 2.0f);
+
+        font_draw_shadow(ren, (VIEW_W - font_width(1.6f, "UP/DOWN TO CHOOSE, SPACE TO START, ESC TO GO BACK")) * 0.5f,
+                         VIEW_H - 46.0f, 1.6f,
+                         "UP/DOWN TO CHOOSE, SPACE TO START, ESC TO GO BACK",
+                         COL_DIM);
+    } else if (g->menu_state == MENU_PAUSE) {
+        font_draw_shadow(ren, (VIEW_W - font_width(5.0f, "PAUSED")) * 0.5f,
+                         VIEW_H * 0.20f, 5.0f, "PAUSED", COL_WHITE);
+
+        SDL_snprintf(buf, sizeof(buf), "BEST %d%%   ATTEMPTS %d",
+                     (int)(g->best_progress * 100.0f + 0.5f), g->attempts);
+        font_draw_shadow(ren, (VIEW_W - font_width(2.0f, buf)) * 0.5f,
+                         VIEW_H * 0.31f, 2.0f, buf, COL_DIM);
+
+        static const char *items[3] = { "RESUME", "RESTART", "LEVEL SELECT" };
+        float w = 520.0f, h = 72.0f, gap = 16.0f;
+        float x = (VIEW_W - w) * 0.5f;
+        float y = VIEW_H * 0.40f;
+        for (int i = 0; i < 3; i++) {
+            draw_button(g, x, y + i * (h + gap), w, h, items[i],
+                        i == g->menu_sel, 2.2f);
+        }
+    }
+}
+
+void game_menu_move(Game *g, int delta)
+{
+    int count = 1;
+    if (g->menu_state == MENU_LEVELS) {
+        count = LEVEL_COUNT;
+    } else if (g->menu_state == MENU_PAUSE) {
+        count = 3;
+    }
+    g->menu_sel = (g->menu_sel + delta + count) % count;
+}
+
+void game_start_level(Game *g)
+{
+    g->attempts = 1;
+    g->best_progress = 0.0f;
+    g->deaths = 0;
+    g->name_timer = 0.0f;
+    g->auto_jump_index = 0;
+    g->paused = false;
+    game_respawn(g);
+}
+
+void game_menu_activate(Game *g)
+{
+    audio_play(g, SFX_BLOCK);
+
+    if (g->menu_state == MENU_MAIN) {
+        g->menu_state = MENU_LEVELS;
+        g->menu_sel = 0;
+        return;
+    }
+
+    if (g->menu_state == MENU_LEVELS) {
+        if (g->menu_sel < LEVEL_COUNT &&
+            SDL_strcmp(g->level_path, kLevels[g->menu_sel].path) != 0) {
+            if (level_load(&g->level, kLevels[g->menu_sel].path)) {
+                g->level_path = kLevels[g->menu_sel].path;
+                g->auto_jumps = NULL;
+                g->auto_jump_count = 0;
+            }
+        }
+        g->state = STATE_PLAY;
+        game_start_level(g);
+        return;
+    }
+
+    /* pause menu */
+    switch (g->menu_sel) {
+    case 0:
+        g->state = STATE_PLAY;
+        g->paused = false;
+        break;
+    case 1:
+        g->state = STATE_PLAY;
+        game_start_level(g);
+        break;
+    default:
+        g->state = STATE_MENU;
+        g->menu_state = MENU_LEVELS;
+        g->menu_sel = 0;
+        g->paused = false;
+        break;
+    }
+}
+
 void render_ui(Game *g)
 {
     SDL_Renderer *ren = g->renderer;
@@ -716,7 +975,11 @@ void render_ui(Game *g)
 void game_render(Game *g)
 {
     render_world(g);
-    render_ui(g);
+    if (g->state == STATE_MENU) {
+        render_menu(g);
+    } else {
+        render_ui(g);
+    }
     if (!g->headless_surface) {
         SDL_RenderPresent(g->renderer);
     }

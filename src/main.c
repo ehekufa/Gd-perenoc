@@ -26,6 +26,7 @@ typedef struct {
     int  seconds;
     const char *screenshot;
     const char *level;
+    const char *menu;          /* --menu main|levels|pause: stay in the menu */
     int  shot_time_ms;
     int  width, height;
 } Options;
@@ -41,6 +42,8 @@ static void parse_args(Options *o, int argc, char **argv)
             o->selftest = o->headless = true;
         } else if (!strcmp(argv[i], "--autoplay")) {
             o->autoplay = true;
+        } else if (!strcmp(argv[i], "--menu")) {
+            o->menu = (i + 1 < argc && argv[i + 1][0] != '-') ? argv[++i] : "main";
         } else if (!strcmp(argv[i], "--level") && i + 1 < argc) {
             o->level = argv[++i];
         } else if (!strcmp(argv[i], "--manual")) {
@@ -65,6 +68,7 @@ static void parse_args(Options *o, int argc, char **argv)
                    "  --autoplay            let the autopilot play\n"
                    "  --manual              do not autoplay in --screenshot mode\n"
                    "  --level FILE.lvl      play a custom level\n"
+                   "  --menu [main|levels|pause]  start in the menu instead of the game\n"
                    "  --headless            no window (needs --screenshot)\n"
                    "  --screenshot FILE     render one frame to FILE.bmp\n"
                    "  --shot-time MS        frame time for --screenshot\n"
@@ -173,7 +177,7 @@ static int run_selftest(const Options *o)
         return 1;
     }
     g.autoplay = true;
-    g.attempts = 1;
+    game_start_level(&g);          /* leaves the menu, resets attempts */
     game_compute_autopilot(&g);
 
     float t = 0.0f;
@@ -209,8 +213,18 @@ static int run_screenshot(const Options *o)
         return 1;
     }
     g.autoplay = !o->no_autoplay;
-    g.attempts = 1;
-    if (g.autoplay) {
+    if (!o->menu) {
+        game_start_level(&g);
+    } else if (!strcmp(o->menu, "levels")) {
+        g.menu_state = MENU_LEVELS;
+        g.menu_sel = 0;
+    } else if (!strcmp(o->menu, "pause")) {
+        game_start_level(&g);
+        g.state = STATE_MENU;
+        g.menu_state = MENU_PAUSE;
+        g.menu_sel = 0;
+    }
+    if (g.autoplay && g.state != STATE_MENU) {
         game_compute_autopilot(&g);
     }
 
@@ -275,6 +289,13 @@ int main(int argc, char **argv)
     g.autoplay = opt.autoplay;
     g.attempts = 1;
 
+    if (!opt.menu) {
+        game_start_level(&g);      /* skip the menu when explicitly asked */
+    }
+    if (g.autoplay) {
+        game_compute_autopilot(&g);
+    }
+
     SDL_Log("Point of No Return started (%s)", SDL_GetCurrentVideoDriver());
 
     const bool *keys = SDL_GetKeyboardState(NULL);
@@ -289,9 +310,32 @@ int main(int argc, char **argv)
                 running = false;
                 break;
             case SDL_EVENT_KEY_DOWN:
+                if (g.state == STATE_MENU) {
+                    /* menu navigation */
+                    if (ev.key.key == SDLK_UP || ev.key.key == SDLK_W) {
+                        game_menu_move(&g, -1);
+                    } else if (ev.key.key == SDLK_DOWN || ev.key.key == SDLK_S) {
+                        game_menu_move(&g, +1);
+                    } else if (ev.key.key == SDLK_SPACE || ev.key.key == SDLK_RETURN) {
+                        game_menu_activate(&g);
+                    } else if (ev.key.key == SDLK_ESCAPE) {
+                        if (g.menu_state == MENU_LEVELS) {
+                            g.menu_state = MENU_MAIN;
+                            g.menu_sel = 0;
+                        } else if (g.menu_state == MENU_PAUSE) {
+                            /* resume */
+                            g.state = STATE_PLAY;
+                            g.paused = false;
+                        }
+                    }
+                    break;
+                }
                 if (ev.key.key == SDLK_ESCAPE) {
                     if (g.state == STATE_PLAY) {
-                        g.paused = !g.paused;
+                        g.state = STATE_MENU;
+                        g.menu_state = MENU_PAUSE;
+                        g.menu_sel = 0;
+                        g.paused = true;
                     }
                 } else if (ev.key.key == SDLK_R && !ev.key.repeat) {
                     game_respawn(&g);
@@ -311,7 +355,9 @@ int main(int argc, char **argv)
                 break;
             case SDL_EVENT_FINGER_DOWN:
                 g.touches_down++;
-                if (g.state == STATE_WIN) {
+                if (g.state == STATE_MENU) {
+                    game_menu_activate(&g);
+                } else if (g.state == STATE_WIN) {
                     game_respawn(&g);
                 } else if (g.paused) {
                     g.paused = false;
@@ -324,7 +370,13 @@ int main(int argc, char **argv)
                 }
                 break;
             case SDL_EVENT_MOUSE_BUTTON_DOWN: {
-                if (g.state == STATE_WIN) {
+                if (g.state == STATE_MENU) {
+                    /* pick the entry under the cursor */
+                    float mx = ev.button.x, my = ev.button.y;
+                    float lx = 0.0f, ly = 0.0f;
+                    SDL_RenderCoordinatesFromWindow(g.renderer, mx, my, &lx, &ly);
+                    game_menu_point(&g, lx, ly);
+                } else if (g.state == STATE_WIN) {
                     game_respawn(&g);
                 } else if (g.paused) {
                     g.paused = false;
@@ -333,6 +385,9 @@ int main(int argc, char **argv)
             }
             case SDL_EVENT_WINDOW_FOCUS_LOST:
                 if (g.state == STATE_PLAY) {
+                    g.state = STATE_MENU;
+                    g.menu_state = MENU_PAUSE;
+                    g.menu_sel = 0;
                     g.paused = true;
                 }
                 break;
@@ -343,13 +398,16 @@ int main(int argc, char **argv)
 
         bool hold = keys[SDL_SCANCODE_SPACE] || keys[SDL_SCANCODE_UP] ||
                     keys[SDL_SCANCODE_W];
+        if (g.state == STATE_MENU) {
+            hold = false;
+        }
 
         /* touch / mouse held down also counts as jump */
         Uint32 buttons = SDL_GetMouseState(NULL, NULL);
         if (buttons & SDL_BUTTON_LMASK) {
             hold = true;
         }
-        if (g.touches_down > 0) {
+        if (g.touches_down > 0 && g.state != STATE_MENU) {
             hold = true;
         }
         {
