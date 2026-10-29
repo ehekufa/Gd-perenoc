@@ -1,0 +1,7 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <!-- Fullscreen, no title bar, dark background while the game boots. -->
+    <style name="AppTheme" parent="android:Theme.NoTitleBar.Fullscreen">
+        <item name="android:windowBackground">@color/gameBackground</item>
+    </style>
+</resources>

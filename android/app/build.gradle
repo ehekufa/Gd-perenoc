@@ -1,0 +1,71 @@
+plugins {
+    id 'com.android.application'
+}
+
+// Bumped from CI (GD_VERSION_CODE / GD_VERSION_NAME), defaults to 1 / "1.0".
+def gdVersionCode = (System.getenv("GD_VERSION_CODE") ?: "1").toInteger()
+def gdVersionName = System.getenv("GD_VERSION_NAME") ?: "1.0"
+
+android {
+    namespace = "com.ehekufa.pointofnoreturn"
+    compileSdkVersion 35
+    ndkVersion "27.2.12479018"
+
+    defaultConfig {
+        applicationId "com.ehekufa.pointofnoreturn"
+        minSdkVersion 21
+        targetSdkVersion 35
+        // CI passes an increasing version so every build can be installed
+        // over the previous one (same signing key required, see README).
+        versionCode gdVersionCode
+        versionName gdVersionName
+
+        externalNativeBuild {
+            cmake {
+                arguments "-DANDROID_PLATFORM=android-21", "-DANDROID_STL=c++_static"
+                // CI compiles through ccache so repeat builds take seconds
+                if (System.getenv("GD_CCACHE") != null) {
+                    arguments "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+                              "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+                }
+                // phones + tablets; x86_64 keeps emulators working
+                abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
+            }
+        }
+    }
+
+    buildTypes {
+        release {
+            minifyEnabled false
+            proguardFiles getDefaultProguardFile('proguard-android.txt'), 'proguard-rules.pro'
+            // signed with the debug key so the release APK is installable as is;
+            // replace this with your own keystore before publishing anywhere
+            signingConfig signingConfigs.debug
+        }
+    }
+
+    // the game textures (assets/textures/*.png) live in the repository root
+    sourceSets.main {
+        assets.srcDirs += ['../../assets']
+        jniLibs.srcDir 'libs'
+    }
+
+    externalNativeBuild {
+        cmake {
+            path 'jni/CMakeLists.txt'
+        }
+    }
+
+    applicationVariants.all { variant ->
+        tasks["merge${variant.name.capitalize()}Assets"]
+            .dependsOn("externalNativeBuild${variant.name.capitalize()}")
+    }
+
+    lint {
+        abortOnError = false
+    }
+}
+
+dependencies {
+    implementation fileTree(include: ['*.jar'], dir: 'libs')
+}
