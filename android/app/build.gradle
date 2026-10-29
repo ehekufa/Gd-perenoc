@@ -23,6 +23,11 @@ android {
         externalNativeBuild {
             cmake {
                 arguments "-DANDROID_PLATFORM=android-21", "-DANDROID_STL=c++_static"
+                // CI compiles through ccache so repeat builds take seconds
+                if (System.getenv("GD_CCACHE") != null) {
+                    arguments "-DCMAKE_C_COMPILER_LAUNCHER=ccache",
+                              "-DCMAKE_CXX_COMPILER_LAUNCHER=ccache"
+                }
                 // phones + tablets; x86_64 keeps emulators working
                 abiFilters 'arm64-v8a', 'armeabi-v7a', 'x86_64'
             }

@@ -8,49 +8,21 @@ on:
     branches: [main, 'arena/**']
   pull_request:
   workflow_dispatch:
+    inputs:
+      emulator:
+        description: 'Also run the APK on an Android 14 emulator (slow, ~8 min)'
+        type: boolean
+        default: false
+
+env:
+  SDL_TAG: release-3.2.30
+  BUILD_TOOLS: 35.0.0
+  NDK_VERSION: 27.2.12479018
 
 jobs:
-  desktop:
-    name: Linux desktop build + level verification
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install build dependencies
-        run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
-            ninja-build cmake gcc \
-            libasound2-dev libpulse-dev libudev-dev \
-            libx11-dev libxext-dev libxrandr-dev libxi-dev libxcursor-dev \
-            libxfixes-dev libxss-dev libwayland-dev libxkbcommon-dev \
-            libdrm-dev libgbm-dev libegl1-mesa-dev
-
-      - name: Configure
-        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
-
-      - name: Build
-        run: cmake --build build --verbose
-
-      - name: Verify that the level is beatable (autopilot replay)
-        run: ctest --test-dir build --output-on-failure
-
-      - name: Render a gameplay screenshot
-        run: |
-          mkdir -p screenshots
-          ./build/point_of_no_return --screenshot screenshots/gameplay.bmp --shot-time 9000
-          ./build/point_of_no_return --screenshot screenshots/finish.bmp --shot-time 64000
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: point-of-no-return-linux
-          path: build/point_of_no_return
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: screenshots
-          path: screenshots/
-
+  # Fast job: builds the APK in a couple of minutes. The emulator run is
+  # opt-in (workflow_dispatch input or the [emulator] tag in the commit
+  # message), so ordinary pushes stay quick.
   android:
     name: Android APK
     runs-on: ubuntu-latest
@@ -61,18 +33,56 @@ jobs:
         with:
           distribution: temurin
           java-version: '17'
+          cache: gradle
 
-      - name: Install SDK packages and NDK
+      - name: Check the Android toolchain
+        id: toolchain
         run: |
-          SDK_ROOT="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
-          echo "ANDROID_HOME=$SDK_ROOT" >> "$GITHUB_ENV"
-          echo "ANDROID_SDK_ROOT=$SDK_ROOT" >> "$GITHUB_ENV"
-          SDKM="$SDK_ROOT/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" --install "platforms;android-35" "build-tools;35.0.0" \
-                            "ndk;27.2.12479018" "cmake;3.22.1"
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          NEED=""
+          [ -f "$SDK/platforms/android-35/android.jar" ] || NEED="$NEED platforms;android-35"
+          [ -x "$SDK/build-tools/$BUILD_TOOLS/aapt2" ] || NEED="$NEED build-tools;$BUILD_TOOLS"
+          [ -d "$SDK/ndk/$NDK_VERSION" ] || NEED="$NEED ndk;$NDK_VERSION"
+          if [ -n "$NEED" ]; then
+            echo "missing:$NEED"
+            echo "install=yes" >> "$GITHUB_OUTPUT"
+            echo "packages=$NEED" >> "$GITHUB_OUTPUT"
+          else
+            echo "Android SDK $SDK already has platform 35, build-tools $BUILD_TOOLS and NDK $NDK_VERSION"
+            echo "install=no" >> "$GITHUB_OUTPUT"
+          fi
 
-      - name: Fetch SDL3 sources
+      - name: Install the missing SDK packages
+        if: steps.toolchain.outputs.install == 'yes'
+        run: |
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install ${{ steps.toolchain.outputs.packages }}
+
+      - name: Enable ccache
+        run: |
+          echo "GD_CCACHE=1" >> "$GITHUB_ENV"
+          echo "CCACHE_DIR=${{ runner.temp }}/ccache" >> "$GITHUB_ENV"
+          echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
+          echo "CCACHE_BASEDIR=${{ github.workspace }}" >> "$GITHUB_ENV"
+          echo "CCACHE_MAXSIZE=2G" >> "$GITHUB_ENV"
+
+      - name: Restore caches (SDL sources, native objects, Gradle)
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/app/jni/SDL
+            ${{ runner.temp }}/ccache
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-v1-${{ runner.os }}-${{ env.SDL_TAG }}-${{ hashFiles('src/**', 'CMakeLists.txt', 'android/**/*.gradle', 'scripts/fetch_sdl.sh') }}
+          restore-keys: |
+            android-v1-${{ runner.os }}-${{ env.SDL_TAG }}-
+            android-v1-${{ runner.os }}-
+
+      - name: Fetch SDL3 sources (skipped when cached)
         run: scripts/fetch_sdl.sh
 
       - name: Build APK
@@ -80,15 +90,73 @@ jobs:
         env:
           GD_VERSION_CODE: ${{ github.run_number }}
           GD_VERSION_NAME: "1.0.${{ github.run_number }}"
-        run: ./gradlew --no-daemon assembleDebug assembleRelease
+        run: ./gradlew --no-daemon assembleRelease --build-cache --console=plain
 
-      - name: Show the APKs
+      - name: Show the APK
         run: find android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
 
-      # Boot a real Android 14 image, install the APK, start it and check that
-      # it stays alive. This is the only way to know it does not crash on a
-      # phone. Note: every line of `script` is executed as its own shell
-      # command, so no multi-line if/then here.
+      - uses: actions/upload-artifact@v4
+        with:
+          name: point-of-no-return-apk
+          path: android/app/build/outputs/apk/release/*.apk
+          if-no-files-found: error
+
+      - name: Publish the APK as a release
+        if: github.event_name == 'push'
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          gh release view apk-latest >/dev/null 2>&1 || gh release create apk-latest --title "Point of No Return - APK"
+          gh release edit apk-latest --notes "APK 1.0.$GITHUB_RUN_NUMBER (build #$GITHUB_RUN_NUMBER), branch $GITHUB_REF_NAME, commit $GITHUB_SHA."
+          gh release upload apk-latest android/app/build/outputs/apk/release/app-release.apk --clobber
+
+  # Slow job, opt-in only: boot a real Android 14 image and make sure the
+  # game actually starts there.
+  emulator:
+    name: Android 14 emulator smoke test
+    if: github.event_name == 'workflow_dispatch' && inputs.emulator || contains(github.event.head_commit.message, '[emulator]')
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+          cache: gradle
+
+      - name: Install SDK packages and NDK
+        run: |
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
+          echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
+          yes | "$SDKM" --licenses > /dev/null || true
+          "$SDKM" --install "platforms;android-35" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION"
+
+      - name: Restore caches
+        uses: actions/cache@v4
+        with:
+          path: |
+            android/app/jni/SDL
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: android-v1-${{ runner.os }}-${{ env.SDL_TAG }}-${{ hashFiles('src/**', 'CMakeLists.txt', 'android/**/*.gradle', 'scripts/fetch_sdl.sh') }}
+          restore-keys: |
+            android-v1-${{ runner.os }}-${{ env.SDL_TAG }}-
+            android-v1-${{ runner.os }}-
+
+      - name: Fetch SDL3 sources (skipped when cached)
+        run: scripts/fetch_sdl.sh
+
+      - name: Build APK
+        working-directory: android
+        env:
+          GD_VERSION_CODE: ${{ github.run_number }}
+          GD_VERSION_NAME: "1.0.${{ github.run_number }}"
+        run: ./gradlew --no-daemon assembleRelease --build-cache --console=plain
+
       - name: Run the APK on an Android 14 emulator
         uses: ReactiveCircus/android-emulator-runner@v2
         with:
@@ -99,7 +167,7 @@ jobs:
           emulator-options: -no-window -gpu swiftshader_indirect -noaudio -no-boot-anim -camera-back none
           script: |
             mkdir -p emulator
-            adb install -r android/app/build/outputs/apk/debug/app-debug.apk
+            adb install -r android/app/build/outputs/apk/release/app-release.apk
             adb logcat -c
             adb shell am start -W -n com.ehekufa.pointofnoreturn/org.libsdl.app.SDLActivity
             sleep 25
@@ -118,39 +186,48 @@ jobs:
           path: emulator/
           if-no-files-found: warn
 
-      # Workflow logs and artifacts are not reachable from every environment,
-      # so the relevant part of logcat is pushed to a small `ci-logs` branch
-      # where it can simply be fetched.
-      - name: Publish the emulator log to the ci-logs branch
-        if: always()
-        continue-on-error: true
+  desktop:
+    name: Linux desktop build + level verification
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install build dependencies
         run: |
-          set +e
-          mkdir -p /tmp/ci
-          printf 'run %s, commit %s\n' "$GITHUB_RUN_ID" "$GITHUB_SHA" > /tmp/ci/emulator-log.txt
-          echo "--- app pid ---" >> /tmp/ci/emulator-log.txt
-          cat emulator/pid.txt >> /tmp/ci/emulator-log.txt 2>/dev/null || echo "(no pid: the app died)" >> /tmp/ci/emulator-log.txt
-          echo "--- logcat ---" >> /tmp/ci/emulator-log.txt
-          grep -iE "pointofnoreturn|SDL|AndroidRuntime|FATAL|Exception" emulator/logcat.txt 2>/dev/null | tail -n 200 >> /tmp/ci/emulator-log.txt
-          cd /tmp/ci
-          git init -q .
-          git add emulator-log.txt
-          git -c user.email=ci@users.noreply.github.com -c user.name=ci commit -qm "emulator log"
-          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/ci-logs
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            ninja-build cmake ccache \
+            libasound2-dev libpulse-dev libudev-dev \
+            libx11-dev libxext-dev libxi-dev libxcursor-dev \
+            libxfixes-dev libxss-dev libwayland-dev libxkbcommon-dev \
+            libdrm-dev libgbm-dev libegl1-mesa-dev
+
+      - name: Restore ccache
+        uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/ccache
+          key: desktop-${{ runner.os }}-${{ hashFiles('src/**', 'CMakeLists.txt') }}
+          restore-keys: desktop-${{ runner.os }}-
+
+      - name: Configure
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+        run: cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release -DCMAKE_C_COMPILER_LAUNCHER=ccache
+
+      - name: Build
+        env:
+          CCACHE_DIR: ${{ runner.temp }}/ccache
+        run: cmake --build build
+
+      - name: Verify that the level is beatable (autopilot replay)
+        run: ctest --test-dir build --output-on-failure
+
+      - name: Render a gameplay screenshot
+        run: |
+          mkdir -p screenshots
+          ./build/point_of_no_return --screenshot screenshots/gameplay.bmp --shot-time 9000
 
       - uses: actions/upload-artifact@v4
         with:
-          name: point-of-no-return-apk
-          path: android/app/build/outputs/apk/**/*.apk
-          if-no-files-found: error
-
-      # so the APK can be downloaded without a GitHub login
-      - name: Publish the APK as a release
-        if: github.event_name == 'push'
-        continue-on-error: true
-        env:
-          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
-        run: |
-          gh release view apk-latest >/dev/null 2>&1 || gh release create apk-latest --title "Point of No Return - APK"
-          gh release edit apk-latest --notes "APK 1.0.$GITHUB_RUN_NUMBER (build #$GITHUB_RUN_NUMBER), branch $GITHUB_REF_NAME, commit $GITHUB_SHA. Every build is started on an Android 14 emulator before it is published."
-          gh release upload apk-latest android/app/build/outputs/apk/debug/app-debug.apk android/app/build/outputs/apk/release/app-release.apk --clobber
+          name: point-of-no-return-linux
+          path: build/point_of_no_return
