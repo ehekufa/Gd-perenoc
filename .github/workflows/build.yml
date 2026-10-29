@@ -110,18 +110,20 @@ jobs:
           set -o pipefail
           ./gradlew --no-daemon assembleRelease --build-cache --console=plain 2>&1 | tee "$RUNNER_TEMP/gradle.log"
 
-      - name: Publish the Gradle log to the ci-logs branch
+      - name: Publish the Gradle log as a commit comment
         if: failure()
         continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          set +e
-          mkdir -p /tmp/ci
-          { echo "run $GITHUB_RUN_ID, commit $GITHUB_SHA"; tail -n 300 "$RUNNER_TEMP/gradle.log"; } > /tmp/ci/android-build-log.txt
-          cd /tmp/ci
-          git init -q .
-          git add android-build-log.txt
-          git -c user.email=ci@users.noreply.github.com -c user.name=ci commit -qm "android build log"
-          git push --force "https://x-access-token:${{ secrets.GITHUB_TOKEN }}@github.com/${{ github.repository }}.git" HEAD:refs/heads/ci-logs
+          set -e
+          {
+            echo "Gradle log for run ${{ github.run_id }}:"
+            echo '```'
+            tail -n 120 "$RUNNER_TEMP/gradle.log" | tail -c 30000
+            echo '```'
+          } > "$RUNNER_TEMP/body.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/body.md" > /dev/null
 
       - name: Show the APK
         run: find android/app/build/outputs/apk -name '*.apk' -exec ls -lh {} \;
