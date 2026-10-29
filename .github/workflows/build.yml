@@ -226,6 +226,22 @@ jobs:
           path: emulator/
           if-no-files-found: warn
 
+      - name: Report the emulator log as a commit comment
+        if: always()
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          set -e
+          {
+            echo "Android 14 emulator, run ${{ github.run_id }}, commit ${{ github.sha }}:"
+            echo '```'
+            echo "app pid: $(cat emulator/pid.txt 2>/dev/null || echo none)"
+            grep -iE "pointofnoreturn|SDL|AndroidRuntime|FATAL" emulator/logcat.txt 2>/dev/null | tail -n 80
+            echo '```'
+          } > "$RUNNER_TEMP/emu.md"
+          gh api -X POST "repos/${{ github.repository }}/commits/${{ github.sha }}/comments" -F body=@"$RUNNER_TEMP/emu.md" > /dev/null
+
   desktop:
     name: Linux desktop build + level verification
     runs-on: ubuntu-latest
