@@ -41,25 +41,41 @@ jobs:
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
+          echo "SDK root: $SDK"
+          ls "$SDK" 2>/dev/null || true
           NEED=""
           [ -f "$SDK/platforms/android-35/android.jar" ] || NEED="$NEED platforms;android-35"
           [ -x "$SDK/build-tools/$BUILD_TOOLS/aapt2" ] || NEED="$NEED build-tools;$BUILD_TOOLS"
           [ -d "$SDK/ndk/$NDK_VERSION" ] || NEED="$NEED ndk;$NDK_VERSION"
-          if [ -n "$NEED" ]; then
-            echo "missing:$NEED"
-            echo "install=yes" >> "$GITHUB_OUTPUT"
-            echo "packages=$NEED" >> "$GITHUB_OUTPUT"
-          else
-            echo "Android SDK $SDK already has platform 35, build-tools $BUILD_TOOLS and NDK $NDK_VERSION"
-            echo "install=no" >> "$GITHUB_OUTPUT"
-          fi
+          ls -d "$SDK"/cmake/*/ >/dev/null 2>&1 || NEED="$NEED cmake;3.22.1"
+          NEED="$(echo $NEED)"
+          echo "packages to install:${NEED:- none}"
+          echo "packages=$NEED" >> "$GITHUB_OUTPUT"
+          if [ -n "$NEED" ]; then echo "install=yes" >> "$GITHUB_OUTPUT"; else echo "install=no" >> "$GITHUB_OUTPUT"; fi
 
       - name: Install the missing SDK packages
         if: steps.toolchain.outputs.install == 'yes'
+        env:
+          PACKAGES: ${{ steps.toolchain.outputs.packages }}
         run: |
-          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" --install ${{ steps.toolchain.outputs.packages }}
+          SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
+          SDKM="$(command -v sdkmanager || true)"
+          if [ -z "$SDKM" ]; then
+            SDKM="$(find "$SDK" -type f -name sdkmanager 2>/dev/null | head -n 1)"
+          fi
+          echo "sdkmanager: ${SDKM:-not found}"
+          [ -n "$SDKM" ] || { echo "no sdkmanager in this image"; exit 1; }
+          yes | "$SDKM" --sdk_root="$SDK" --licenses >/dev/null 2>&1 || true
+          "$SDKM" --sdk_root="$SDK" --list_installed || true
+          for pkg in $PACKAGES; do
+            echo "== installing $pkg"
+            ok=no
+            for try in 1 2 3; do
+              if "$SDKM" --sdk_root="$SDK" --install "$pkg"; then ok=yes; break; fi
+              echo "retry $try for $pkg"; sleep 5
+            done
+            [ "$ok" = yes ] || { echo "could not install $pkg"; exit 1; }
+          done
 
       - name: Enable ccache
         run: |
@@ -131,9 +147,11 @@ jobs:
           SDK="${ANDROID_HOME:-/usr/local/lib/android/sdk}"
           echo "ANDROID_HOME=$SDK" >> "$GITHUB_ENV"
           echo "ANDROID_SDK_ROOT=$SDK" >> "$GITHUB_ENV"
-          SDKM="$SDK/cmdline-tools/latest/bin/sdkmanager"
-          yes | "$SDKM" --licenses > /dev/null || true
-          "$SDKM" --install "platforms;android-35" "build-tools;$BUILD_TOOLS" "ndk;$NDK_VERSION"
+          SDKM="$(command -v sdkmanager || true)"
+          [ -n "$SDKM" ] || SDKM="$(find "$SDK" -type f -name sdkmanager 2>/dev/null | head -n 1)"
+          yes | "$SDKM" --sdk_root="$SDK" --licenses > /dev/null 2>&1 || true
+          "$SDKM" --sdk_root="$SDK" --install "platforms;android-35" "build-tools;$BUILD_TOOLS" \
+            "ndk;$NDK_VERSION" "cmake;3.22.1" || true
 
       - name: Restore caches
         uses: actions/cache@v4
