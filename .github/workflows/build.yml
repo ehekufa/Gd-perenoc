@@ -79,6 +79,11 @@ jobs:
 
       - name: Enable ccache
         run: |
+          if ! command -v ccache > /dev/null; then
+            sudo apt-get update -qq
+            sudo apt-get install -y --no-install-recommends ccache
+          fi
+          ccache --version | head -n 1
           echo "GD_CCACHE=1" >> "$GITHUB_ENV"
           echo "CCACHE_DIR=${{ runner.temp }}/ccache" >> "$GITHUB_ENV"
           echo "CCACHE_COMPILERCHECK=content" >> "$GITHUB_ENV"
